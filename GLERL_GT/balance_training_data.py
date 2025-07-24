@@ -10,29 +10,40 @@ import xarray as xr
 import earthaccess
 
 from helpers import *
-# Make sure process_pace_granule and extract_pace_patch are importable:
-# e.g., from your module where you defined them:
-# from data_collection_helpers import process_pace_granule, extract_pace_patch
 
-def balance_dataset_by_granule(sensor, max_granule_attempts=137, seed=42):
+def balance_dataset_by_granule(
+        sensor       = "PACE",
+        patch_size   = 3,
+        pm_threshold = 0.1,
+        save_dir     = './'
+    ):
     """
     Balance by iterating winter-month granules first.
     Handles PACE specially by using process_pace_granule and extract_pace_patch.
     """
     logging.basicConfig(level=logging.INFO)
+
+    seed = 45
+    max_granule_attempts = 137
+
+    logging.basicConfig(level=logging.INFO)
     logging.info(f"Starting granule-first balancing for sensor={sensor}")
+
     # Load station DataFrame
     df = pd.read_csv("glrl-hab-data.csv", index_col=0)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+
     # Load existing results
-    results_path = f"training_data_{sensor}.npy"
+    results_path = f"{save_dir}training_data_{sensor}.npy"
     if not os.path.exists(results_path):
         logging.error(f"No existing training data at {results_path}; run process_all_granules first.")
         return
+    
     arr = np.load(results_path, allow_pickle=True)
     results = arr.tolist()  # list of tuples: (filename, station_name, label_tuple, patch_flat)
+
     # Load processed granules set
-    processed_txt = f"processed_granules_{sensor}.txt"
+    processed_txt = f"{save_dir}processed_granules_{sensor}.txt"
     processed_set = set()
     if os.path.exists(processed_txt):
         with open(processed_txt, "r") as f:
@@ -40,6 +51,7 @@ def balance_dataset_by_granule(sensor, max_granule_attempts=137, seed=42):
                 fn = line.strip()
                 if fn:
                     processed_set.add(fn)
+
     invalid_txt = f"invalid_granules_{sensor}.txt"
     invalid_set = set()
     if os.path.exists(invalid_txt):
@@ -52,56 +64,64 @@ def balance_dataset_by_granule(sensor, max_granule_attempts=137, seed=42):
     # Sensor parameters: must match main
     sensor = sensor.upper()
     sensor_map = {
+
         "MODIS": {
             "short_names": ["MODISA_L2_OC", "MODIST_L2_OC"],
-            "res_km": 1.0,
-            "pixel_count": 3,
+            "res_km": 1.0
         },
         "SENTINEL": {
             "short_names": ["OLCIS3A_L2_EFR_OC", "OLCIS3A_L2_EFR_OC_NRT",
                             "OLCIS3B_L2_EFR_OC", "OLCIS3B_L2_EFR_OC_NRT"],
-            "res_km": 0.4,
-            "pixel_count": 8,
+            "res_km": 0.4
         },
         "PACE": {
             "short_names": ["PACE_OCI_L2_AOP", "PACE_OCI_L2_AOP_NRT"],
-            "res_km": 1.2,
-            "pixel_count": 1,
+            "res_km": 1.2
         }
+
     }
+
     if sensor not in sensor_map:
         logging.error(f"Unsupported sensor '{sensor}'")
         return
+    
     params = sensor_map[sensor]
     bbox = (-83.5, 41.3, -82.45, 42.2)
+
     # Prepare random
     rand = random.Random(seed)
 
     # If PACE: retrieve wave_all once
     if sensor == "PACE":
         logging.info("Retrieving PACE wavelength list for balancing...")
-        # similar to process_all_granules reference retrieval:
+        
         try:
-            search_ref = earthaccess.search_data(
-                short_name="PACE_OCI_L2_AOP",
-                temporal=("2024-06-01", "2024-06-05"),
-                bounding_box=bbox,
+            search_ref       = earthaccess.search_data(
+                short_name   = "PACE_OCI_L2_AOP",
+                temporal     = ("2024-06-01", "2024-06-05"),
+                bounding_box= bbox,
             )
+
             if not search_ref:
                 raise RuntimeError("No reference files found to retrieve wavelengths.")
+            
             ref_file = earthaccess.download(search_ref, "./Data/")[0]
             wave_all = xr.open_dataset(ref_file, group="sensor_band_parameters")["wavelength_3d"].data
+
         except Exception as e:
             logging.error(f"Failed to retrieve PACE wavelength list: {e}")
             return
+        
     else:
         wave_all = None
 
     # Build station-year grouping of existing results
     station_year_records = {}  # (station, year) -> list of mean_micro values
+
     for rec in results:
         _, station, label_tuple, _ = rec
         t0 = label_tuple[1]
+        
         # Determine year
         if isinstance(t0, pd.Timestamp):
             year = t0.year
@@ -113,6 +133,7 @@ def balance_dataset_by_granule(sensor, max_granule_attempts=137, seed=42):
                 year = dt0.year
             except:
                 continue
+        
         mean_micro = label_tuple[4]
         key = (station, year)
         station_year_records.setdefault(key, []).append(mean_micro)
@@ -132,16 +153,13 @@ def balance_dataset_by_granule(sensor, max_granule_attempts=137, seed=42):
     # Build list of station-year needing balancing: pos > neg
     imbalance = {}
     for (station, year), vals in station_year_records.items():
-        pos = sum(1 for v in vals if v >= 0.1)
-        neg = sum(1 for v in vals if v < 0.1)
+        pos = sum(1 for v in vals if v >= pm_threshold)
+        neg = sum(1 for v in vals if v <  pm_threshold)
         if pos > neg and (station, year) in station_year_loc:
             imbalance[(station, year)] = {"pos": pos, "neg": neg}
     if not imbalance:
         logging.info("No station-years need balancing.")
         return
-
-    # EarthAccess login
-    auth = earthaccess.login(persist=True)
 
     # Helper: list winter months for a year
     def winter_month_ranges(year):
@@ -175,10 +193,13 @@ def balance_dataset_by_granule(sensor, max_granule_attempts=137, seed=42):
 
     # Loop per year
     for year in years_sorted:
+        
         stations = year_to_stations[year]
+        
         # Check overall dataset parity
-        total_pos = sum(1 for rec in results if rec[2][4] >= 0.1)
-        total_neg = sum(1 for rec in results if rec[2][4] < 0.1)
+        total_pos = sum(1 for rec in results if rec[2][4] >= pm_threshold)
+        total_neg = sum(1 for rec in results if rec[2][4] <  pm_threshold)
+        
         if total_neg >= total_pos:
             logging.info("Overall dataset reached parity; stopping balancing.")
             break
@@ -186,11 +207,14 @@ def balance_dataset_by_granule(sensor, max_granule_attempts=137, seed=42):
         # For this year, track which stations still need negatives
         need = {}
         for station in stations:
+            
             cnts = station_year_records.get((station, year), [])
-            pos = sum(1 for v in cnts if v >= 0.1)
-            neg = sum(1 for v in cnts if v < 0.1)
+            pos = sum(1 for v in cnts if v >= pm_threshold)
+            neg = sum(1 for v in cnts if v <  pm_threshold)
+            
             if pos > neg:
                 need[station] = {"pos": pos, "neg": neg}
+        
         if not need:
             continue  # already balanced now
 
@@ -199,30 +223,39 @@ def balance_dataset_by_granule(sensor, max_granule_attempts=137, seed=42):
         # Precompute avg locations & patch deg half-sizes
         locs = {}
         for station in need:
+            
+            res_km           = params["res_km"]
+            pixel_count      = patch_size
             avg_lat, avg_lon = station_year_loc[(station, year)]
-            res_km = params["res_km"]
-            pixel_count = params["pixel_count"]
-            half_km = (pixel_count * res_km) / 2.0
+            
+            half_km      = (pixel_count * res_km) / 2.0
             half_lat_deg = half_km / 111.0
             half_lon_deg = half_km / (111.0 * math.cos(math.radians(avg_lat)))
+            
             locs[station] = (avg_lat, avg_lon, half_lat_deg, half_lon_deg)
 
         # Gather all granules in winter months for this year
         granule_items = []
         for (month_start, next_month) in winter_month_ranges(year):
+            
             start_iso = month_start.strftime("%Y-%m-%dT00:00:00Z")
             end_iso = next_month.strftime("%Y-%m-%dT00:00:00Z")
+            
             for sn in params["short_names"]:
                 try:
+                    
                     res = earthaccess.search_data(
                         short_name=sn,
                         temporal=(start_iso, end_iso),
                         bounding_box=bbox
                     )
+                    
                     if res:
                         granule_items.extend(res)
+                
                 except Exception as e:
                     logging.warning(f"Search failed for {sn} in {year}-{month_start.month}: {e}")
+        
         if not granule_items:
             logging.info(f"No winter granules found for year {year}. Cannot balance these stations.")
             continue
@@ -230,12 +263,16 @@ def balance_dataset_by_granule(sensor, max_granule_attempts=137, seed=42):
         # Extract unique granule filenames, filter out processed_set
         unique_items = []
         seen_fnames = set()
+        
         for item in granule_items:
             fname = get_granule_filename(item)
+        
             if not fname or fname in processed_set or fname in invalid_set or fname in seen_fnames:
                 continue
+        
             unique_items.append((item, fname))
             seen_fnames.add(fname)
+        
         if not unique_items:
             logging.info(f"All winter granules already processed for year {year}. Skipping.")
             continue
@@ -246,26 +283,33 @@ def balance_dataset_by_granule(sensor, max_granule_attempts=137, seed=42):
         attempts = 0
         # Iterate granules until all stations balanced or attempts exhausted
         for (item, fname) in unique_items:
+            
             if not need:
                 break
+            
             if attempts >= max_granule_attempts:
                 logging.info(f"Reached granule attempt cap ({max_granule_attempts}) for year {year}.")
                 break
+            
             attempts += 1
 
             # Download granule
             try:
+            
                 os.makedirs(temp_root, exist_ok=True)
                 paths = earthaccess.download([item], temp_root)
+            
                 if not paths:
                     continue
                 gran_path = paths[0]
+            
             except Exception as e:
                 logging.warning(f"Download failed for {fname}: {e}")
                 continue
 
             # For PACE vs others:
             if sensor == "PACE":
+
                 # Use process_pace_granule to get arr_stack etc.
                 try:
                     result = process_pace_granule(gran_path, bbox, params, wave_all)
@@ -276,26 +320,32 @@ def balance_dataset_by_granule(sensor, max_granule_attempts=137, seed=42):
                     try: os.remove(gran_path)
                     except: pass
                     continue
+
                 if result is None:
                     # no valid bands
                     os.remove(gran_path)
                     continue
-                wls, arr_stack, target_lats, target_lons = result
-                # Compute centers arrays:
-                # target_lats and target_lons are 1D arrays of grid centers from regrid_pace_slice
+                else:
+                    wls, arr_stack, target_lats, target_lons = result
+                
                 lat_centers = np.asarray(target_lats)
                 lon_centers = np.asarray(target_lons)
+
             else:
+                
                 # Open & regrid full bbox once
                 try:
+                    
                     with xr.open_dataset(gran_path, group="geophysical_data") as obs, \
                          xr.open_dataset(gran_path, group="navigation_data") as nav:
                         nav = nav.set_coords(("longitude", "latitude"))
                         dataset = xr.merge((obs, nav.coords))
+                
                 except Exception as e:
                     logging.warning(f"Failed to open granule {fname}: {e}")
                     os.remove(gran_path)
                     continue
+                
                 regridded = regrid_granule(dataset, bbox, params["res_km"])
                 if regridded is None:
                     os.remove(gran_path)
@@ -307,6 +357,7 @@ def balance_dataset_by_granule(sensor, max_granule_attempts=137, seed=42):
                 logging.info(f"Cannot parse datetime from {fname}; skipping.")
                 os.remove(gran_path)
                 continue
+            
             gran_year = dt0.year
             if gran_year != year:
                 os.remove(gran_path)
@@ -315,19 +366,32 @@ def balance_dataset_by_granule(sensor, max_granule_attempts=137, seed=42):
             # For each station still needing negatives, try patch
             to_remove = []
             for station, cnts in need.items():
+                
                 avg_lat, avg_lon, half_lat_deg, half_lon_deg = locs[station]
+                
                 if sensor == "PACE":
+                    
                     # Extract patch via extract_pace_patch
                     patch_dict = extract_pace_patch(
-                        arr_stack, wls, avg_lon, avg_lat,
-                        params["pixel_count"],
-                        lat_centers=lat_centers,
-                        lon_centers=lon_centers
+                        arr_stack,
+                        wls,
+                        avg_lon,
+                        avg_lat,
+                        patch_size,
+                        lat_centers = lat_centers,
+                        lon_centers = lon_centers
                     )
+
                 else:
+
                     patch = extract_patch_from_regridded(
-                        regridded, avg_lon, avg_lat, params["pixel_count"], params["res_km"]
+                        regridded,
+                        avg_lon,
+                        avg_lat,
+                        patch_size,
+                        params["res_km"]
                     )
+                    
                     if patch is None:
                         patch_dict = None
                     else:
@@ -335,6 +399,7 @@ def balance_dataset_by_granule(sensor, max_granule_attempts=137, seed=42):
 
                 if patch_dict is None:
                     continue  # this granule doesn't cover station well
+                
                 # Check if all-NaN:
                 if all(np.isnan(arr).all() for arr in patch_dict.values()):
                     continue
@@ -346,17 +411,22 @@ def balance_dataset_by_granule(sensor, max_granule_attempts=137, seed=42):
                 patch_stack = np.stack([patch_dict[b] for b in band_names], axis=-1)
                 patch_flat = patch_stack.flatten()
                 results.append((fname, station, label_tuple, patch_flat))
+                
                 # Update counts
                 station_year_records.setdefault((station, year), []).append(0.0)
                 need_cnt = station_year_records[(station, year)]
-                pos = sum(1 for v in need_cnt if v >= 0.1)
-                neg = sum(1 for v in need_cnt if v < 0.1)
+                
+                pos = sum(1 for v in need_cnt if v >= pm_threshold)
+                neg = sum(1 for v in need_cnt if v <  pm_threshold)
+                
                 logging.info(f"Added negative for {station} year {year} from granule {fname}; now pos={pos}, neg={neg}")
+                
                 if neg >= pos:
                     to_remove.append(station)
                 # Also check overall parity
-                total_pos = sum(1 for rec in results if rec[2][4] >= 0.1)
-                total_neg = sum(1 for rec in results if rec[2][4] < 0.1)
+                total_pos = sum(1 for rec in results if rec[2][4] >= pm_threshold)
+                total_neg = sum(1 for rec in results if rec[2][4] <  pm_threshold)
+
                 if total_neg >= total_pos:
                     logging.info("Overall dataset reached parity; stopping balancing entirely.")
                     to_remove = list(need.keys())
@@ -366,24 +436,30 @@ def balance_dataset_by_granule(sensor, max_granule_attempts=137, seed=42):
             # Remove balanced stations
             for s in to_remove:
                 need.pop(s, None)
+            
             # Mark granule processed so not reused
             processed_set.add(fname)
             with open(processed_txt, "a") as f:
                 f.write(fname + "\n")
+            
             # Save updated results
             np.save(results_path, np.array(results, dtype=object))
+            
             # Clean up granule file
             try:
                 os.remove(gran_path)
             except:
                 pass
+            
             # If no stations left for this year, break
             if not need:
                 logging.info(f"Station-year(s) for year {year} balanced; moving to next year.")
                 break
+        
         # End granule loop for year
         if need:
             logging.info(f"Year {year} ended with imbalance for stations: {need}.")
+        
         # Clean up temp folder contents
         try:
             for fn in os.listdir(temp_root):

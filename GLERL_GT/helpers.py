@@ -10,9 +10,44 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import matplotlib.pyplot as plt
 
-from datetime import datetime
-from pyresample import geometry, kd_tree
+from datetime           import datetime
+from shapely.geometry   import Point
+from pyresample         import geometry, kd_tree
 from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
+
+import time
+import random
+
+def with_retries(fn, *args, max_retries=20, retry_wait=(5, 10), **kwargs):
+    """
+    Run a function with retries on failure.
+    
+    Args:
+        fn: The function to call.
+        *args: Positional arguments for fn.
+        **kwargs: Keyword arguments for fn.
+        max_retries: Max number of attempts (default 3).
+        retry_wait: Tuple (min_sec, max_sec) wait between retries.
+        
+    Returns:
+        Result of fn(*args, **kwargs) if successful.
+        
+    Raises:
+        Last exception raised by fn if all retries fail.
+    """
+    attempt = 0
+    while attempt < max_retries:
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            attempt += 1
+            if attempt < max_retries:
+                wait_time = random.uniform(*retry_wait)
+                print(f"Attempt {attempt} failed: {e}. Retrying in {wait_time:.1f} seconds...")
+                time.sleep(wait_time)
+            else:
+                print(f"Attempt {attempt} failed: {e}. No more retries.")
+                raise
 
 def plot_granule(file, arr_stack, bbox, out_dir):
 
@@ -118,6 +153,7 @@ def process_pace_granule(filepath, bbox, sensor_params, wave_all):
     try:
         with xr.open_dataset(filepath, group="geophysical_data") as geo_ds, \
              xr.open_dataset(filepath, group="navigation_data") as nav_ds:
+            
             # Merge navigation coords if needed
             nav_ds = nav_ds.set_coords(("longitude", "latitude"))
             ds = xr.merge([geo_ds, nav_ds.coords])
@@ -131,6 +167,7 @@ def process_pace_granule(filepath, bbox, sensor_params, wave_all):
             # Assume reflectance variable is named "Rrs" with dims e.g. ("wavelength_3d", "y", "x") or ("wavelength_3d", "latitude", "longitude").
             rrs = ds["Rrs"]  # DataArray
             rrs = rrs.assign_coords(wavelength_3d = wave_all)
+            
             # The wavelength coordinate may be named e.g. "wavelength_3d" or "wavelength". Inspect:
             if "wavelength_3d" in rrs.coords:
                 wl_coord = "wavelength_3d"
@@ -154,23 +191,23 @@ def process_pace_granule(filepath, bbox, sensor_params, wave_all):
 
         lat_arr = ds["latitude"].values   # 2D or 1D broadcastable
         lon_arr = ds["longitude"].values
+        
         result = regrid_pace_slice(slice_da, lat_arr, lon_arr, bbox, sensor_params["res_km"])
         if result is None:
             logging.warning("Regrid PACE slice failed.")
             # mark processed, clean up, and return
             break
+        
         regridded_2d, target_lats, target_lons = result
         regridded_slices.append((wl, regridded_2d))
 
     if not regridded_slices:
         return None  # no valid bands
+   
     # Stack into an xarray DataArray or numpy array: shape (n_wl, ny, nx)
     wls, arrs = zip(*regridded_slices)
     arr_stack = np.stack(arrs, axis=0)
-    # Optionally wrap into DataArray:
-    # coords for target grid: 
-    #   lat_centers, lon_centers computed elsewhere; or build from regrid output
-    # da = xr.DataArray(arr_stack, coords={"wavelength": wls, "y": ..., "x": ...}, dims=("wavelength","y","x"))
+    
     return wls, arr_stack, target_lats, target_lons  # wavelengths array and 3D numpy array
 
 # Helper to extract datetime from filename
@@ -452,94 +489,90 @@ def extract_patch_from_regridded(regridded, lon0, lat0, pixel_count, res_km):
         patch_arrays[band] = patch_adj
     return patch_arrays, half_lon_deg, half_lat_deg
 
-def plot_true_color(ax, regridded_dict, bbox, station_patches, station_colors):
+def plot_true_color(ax, regridded_dict):
     """
     ax: Cartopy GeoAxes (PlateCarree)
     regridded_dict: dict band_name -> 2D DataArray over full bbox grid
-    bbox: (lon_min, lat_min, lon_max, lat_max)
-    station_patches: list of dicts with station overlay info
-    station_colors: dict station_name -> color string
     """
-    # Identify available band wavelengths
+    # 1) find numeric Rrs bands
     band_names = list(regridded_dict.keys())
-    # Parse numeric wavelength from band names, e.g., "Rrs_667" → 667
     wavelengths = {}
     for b in band_names:
         parts = b.split("_")
         try:
-            wl = float(parts[-1])
-            wavelengths[b] = wl
-        except:
+            wavelengths[b] = float(parts[-1])
+        except ValueError:
             continue
+
     if len(wavelengths) < 3:
-        logging.warning("Fewer than 3 numeric Rrs_ bands for true-color; skipping true-color plot.")
+        logging.warning("Fewer than 3 numeric Rrs_ bands; skipping true-color.")
         return
-    # Target wavelengths for RGB (nm)
+
+    # 2) pick closest to 667/555/443 nm
     target = {"red": 667, "green": 555, "blue": 443}
     chosen = {}
     for color, tgt in target.items():
-        # pick band with minimal abs(wl - tgt)
-        b_sel = min(wavelengths.keys(), key=lambda b: abs(wavelengths[b] - tgt))
-        chosen[color] = b_sel
-    logging.info(f"True-color bands chosen: {chosen}")
-    # Extract arrays
-    arrs = {}
-    for color, bname in chosen.items():
-        da = regridded_dict.get(bname)
-        if da is None:
-            logging.warning(f"Band {bname} missing; skip true-color.")
-            return
-        arrs[color] = da.values
+        best = min(wavelengths.keys(), key=lambda b: abs(wavelengths[b] - tgt))
+        chosen[color] = best
 
-    normed = {}
-    # Define per-channel percentiles and gains
-    pct_params = {
-        "red":   (0.02, 0.98, 1.0),
-        "green": (0.02, 0.98, 1.0),  # boost green
-        "blue":  (0.02, 0.98, 1.0)   # optionally reduce blue
-    }
-    for color, arr in arrs.items():
-        flat = arr.flatten()
-        flat = flat[~np.isnan(flat)]
-        if flat.size == 0:
-            logging.warning(f"No valid data in band {chosen[color]}; skip true-color.")
-            return
-        lowp, highp, gain = pct_params.get(color, (0.02, 0.98, 1.0))
-        vmin = np.quantile(flat, lowp)
-        vmax = np.quantile(flat, highp)
-        logging.info(f"{color} ({chosen[color]}) stretch {lowp*100:.1f}–{highp*100:.1f}% → vmin={vmin:.4f}, vmax={vmax:.4f}, gain={gain}")
-        norm = np.clip((arr - vmin) / (vmax - vmin), 0, 1)
-        # gamma
-        gamma = 1/2.2
-        norm = np.clip(norm ** gamma, 0, 1)
-        # apply gain
-        normed[color] = np.clip(norm * gain, 0, 1)
+    logging.info(f"True-color bands → {chosen}")
 
-    # Stack and plot as before
-    rgb = np.stack([normed["red"], normed["green"], normed["blue"]], axis=-1)
-    h, w, _ = rgb.shape
+    # 3) extract raw arrays
+    try:
+        r = regridded_dict[chosen["red"]].values
+        g = regridded_dict[chosen["green"]].values
+        b = regridded_dict[chosen["blue"]].values
+    except KeyError as e:
+        logging.warning(f"Missing expected band {e}; abort true-color.")
+        return
+
+    # 4) stack and normalize to its own min/max
+    rgb_raw = np.dstack((r, g, b)).astype(float)
+    rgb_min = np.nanmin(rgb_raw)
+    rgb_max = np.nanmax(rgb_raw)
+    if rgb_max <= rgb_min:
+        logging.warning("Zero dynamic range in RGB; skipping true-color.")
+        return
+    rgb_norm = (rgb_raw - rgb_min) / (rgb_max - rgb_min)
+
+    # 5) build RGBA—alpha=0 where any channel is NaN
+    h, w, _ = rgb_norm.shape
     rgba = np.zeros((h, w, 4), dtype=float)
-    rgba[..., :3] = rgb
-    # alpha = 0 where any channel is NaN, else 1
-    mask_nan = np.isnan(rgb).any(axis=2)
+    rgba[..., :3] = rgb_norm
+    mask_nan = np.isnan(rgb_norm).any(axis=2)
     rgba[..., 3] = np.where(mask_nan, 0.0, 1.0)
+
+    # 6) compute extent and plot
     da0 = regridded_dict[chosen["red"]]
     lon0, lon1 = float(da0.longitude.min()), float(da0.longitude.max())
     lat0, lat1 = float(da0.latitude.min()), float(da0.latitude.max())
     extent = [lon0, lon1, lat0, lat1]
+
     ax.imshow(
         rgba,
-        origin='lower',
+        origin="lower",
         extent=extent,
-        transform=ccrs.PlateCarree()
+        transform=ccrs.PlateCarree(),
+        interpolation="nearest"
     )
     ax.set_extent(extent, crs=ccrs.PlateCarree())
-    ax.coastlines(resolution='10m', linewidth=0.5)
-    ax.add_feature(cfeature.BORDERS, linewidth=0.5)
-    ax.add_feature(cfeature.STATES, linewidth=0.5)
-    gl = ax.gridlines(draw_labels=True, linewidth=0.2, color='gray', alpha=0.5)
+
+    # 7) add coastlines, borders, grid
+    ax.coastlines(resolution="10m", linewidth=0.5)
+    ax.add_feature(cfeature.BORDERS.with_scale("10m"), linewidth=0.5)
+    ax.add_feature(cfeature.STATES.with_scale("10m"), linewidth=0.5)
+
+    gl = ax.gridlines(draw_labels=True, linewidth=0.3, color='gray', alpha=0.5)
     gl.top_labels = False
     gl.right_labels = False
     gl.xformatter = LongitudeFormatter()
     gl.yformatter = LatitudeFormatter()
 
+def shp_contains(geom, lon_grid, lat_grid):
+    """
+    Returns a boolean mask the same shape as lon_grid / lat_grid,
+    where True indicates (lon,lat) is inside the shapely geometry `geom`.
+    """
+    # vectorize a simple point-in-polygon test
+    contains_vec = np.vectorize(lambda lon, lat: geom.contains(Point(lon, lat)))
+    return contains_vec(lon_grid, lat_grid)

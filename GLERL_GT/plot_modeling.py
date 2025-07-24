@@ -1,314 +1,241 @@
+import glob
 import os
-import matplotlib.pyplot as plt
-import cartopy.crs as ccrs
-import cartopy.feature as cfeature
-from datetime import datetime, timedelta, timezone
-import earthaccess
 import logging
-import xarray as xr
-import numpy as np
-import tensorflow as tf
+import earthaccess
+
+import xarray            as xr
+import numpy             as np
+import tensorflow        as tf
+import cartopy.crs       as ccrs
+import cartopy.feature   as cfeature
+import matplotlib.pyplot as plt
+
+from datetime import datetime, date, timedelta, timezone
 from helpers import (
-    regrid_granule,
-    extract_datetime_from_filename,
     process_pace_granule,
     extract_pace_patch,
-    plot_granule
+    extract_datetime_from_filename,
+    with_retries
 )
+from tqdm import tqdm
+from shapely.ops import unary_union
+from shapely.vectorized import contains as shp_contains
+from shapely.geometry.base import BaseGeometry
 
-start_date       = datetime(2024,4,15,tzinfo=timezone.utc)
-end_date         = datetime(2024,9,1,tzinfo=timezone.utc)
-bbox             = (-83.5, 41.3, -82.45, 42.2)
-model_filename   = "./models/3x3_thres1.keras"
-means_filename   = "channel_means.npy"
-stds_filename    = "channel_stds.npy"
-patch_size       = 3
-wl_ref_file      = "./data/ref/PACE_OCI.20240603T180158.L2.OC_AOP.V3_0.nc"
-out_dir          = "../Images/Daily_Plots"
-dpi              = 100
-window_size_days = 2
-include_chla     = False
 
-min_lon, min_lat, max_lon, max_lat = bbox
+def plot_model_results(
+        patch_size      = 3,
+        save_dir        = './',
+        dates_to_plot   = None,
+        prob_threshold  = 0.5,
+        min_valid_frac  = 0.5
+    ):
+    """
+    Generate daily microcystin‐prediction maps by averaging across all
+    models in `save_dir` whose filenames match "model*.keras".
+    The overlay is red; alpha = fraction_of_models_predicting_positive.
+    """
 
-print("Loading CNN model and stats")
-cnn = tf.keras.models.load_model(model_filename)
-means = np.load(means_filename)
-stds = np.load(stds_filename)
+    # ─── Configuration ────────────────────────────────────────────────────────────
+    start_date    = date(2025, 6, 1)
+    end_date      = date(2025, 7, 21)
+    days_lookback = 7
 
-print("Loading wavelength list")
-wave_all = xr.open_dataset(wl_ref_file, group="sensor_band_parameters")["wavelength_3d"].data
+    if dates_to_plot is None:
+        span = (end_date - start_date).days
+        dates_to_plot = [start_date + timedelta(days=i) for i in range(span + 1)]
 
-date = start_date.date()
+    out_dir = os.path.join(save_dir, "Images", "Daily_Plots")
+    os.makedirs(out_dir, exist_ok=True)
 
-while date <= end_date.date():
+    # ─── Load all models ──────────────────────────────────────────────────────────
+    logging.info("Loading all CNN models from %s", save_dir)
+    model_paths = sorted(glob.glob(os.path.join(save_dir, "model*.keras")))
+    if not model_paths:
+        raise FileNotFoundError(f"No models matching 'model*.keras' in {save_dir}")
+    models = [tf.keras.models.load_model(mp) for mp in model_paths]
+    n_models = len(models)
+    logging.info("  Loaded %d models: %s", n_models, model_paths)
 
-    print(f"building plot for {date}.")
-
-    tspan = (date - timedelta(days = window_size_days), date)
-    print(f"tspan: {tspan}.")
-
-    if include_chla:
-        # ===== CHL =====
-        chl_results = earthaccess.search_data(
-            short_name   = "OLCIS3A_L2_EFR_OC",
-            temporal     = tspan,
-            bounding_box = bbox
-        )
-
-        chl_fileset = earthaccess.download(chl_results, './data/')
-        print(f"Got {len(chl_fileset)} files for this date.")
-
-        chlarray = None
-        valid_count = 0
-
-        for i, file in enumerate(chl_fileset):
-            
-            print(f"regridding chl file {i+1} of {len(chl_fileset)}.")
-
-            # load navigation and chlorophyll
-            nav_chl = (
-                xr.open_dataset(file, group="navigation_data")
-                .set_coords(("longitude", "latitude"))
-            )
-            if "pixel_control_points" in nav_chl.dims:
-                nav_chl = nav_chl.rename_dims({"pixel_control_points": "pixels_per_line"})
-
-            ds_chl = xr.open_dataset(file, group="geophysical_data")
-
-            chlor_a = xr.merge((ds_chl["chlor_a"], nav_chl))
-            
-            chlor_a = chlor_a.where((
-                (chlor_a["latitude"] > bbox[1]) & \
-                (chlor_a["latitude"] < bbox[3]) & \
-                (chlor_a["longitude"] > bbox[0]) & \
-                (chlor_a["longitude"] < bbox[2])),
-            drop = True)
-
-            regrid = regrid_granule(chlor_a, bbox, 0.3, chlor_a=True)
-
-            if regrid is not None:
-                block = regrid["chlor_a"]
-                valid_count += 1
-            else:
-                continue
-            
-            if not isinstance(chlarray, xr.DataArray):
-                if chlarray is None:
-                    # uninitialized
-                    chlarray = block
-                else:
-                    raise ValueError(f"Expected a DataArray or None, got {type(chlarray)}")
-            else:
-                # safe to do array math
-                block = block.fillna(0)
-                chlarray = chlarray + block
-
-        chlarray = chlarray / valid_count
-        chlarray = chlarray.where(chlarray != 0, other=np.nan)
-
-    # ===== MC =====
-
-    mc_results = earthaccess.search_data(
-        short_name  = "PACE_OCI_L2_AOP",
-        temporal    = tspan,
-        bounding_box= bbox
-    )    
-
-    mc_results_NRT = earthaccess.search_data(
-        short_name  = "PACE_OCI_L2_AOP_NRT",
-        temporal    = tspan,
-        bounding_box= bbox
+    # ─── Load stats & wavelengths ─────────────────────────────────────────────────
+    patch_means = np.load(os.path.join(save_dir, 'data/channel_means.npy'))
+    patch_stds  = np.load(os.path.join(save_dir, 'data/channel_stds.npy'))
+    ctx_means   = np.load(os.path.join(save_dir, 'context_means.npy'))
+    ctx_stds    = np.load(os.path.join(save_dir, 'context_stds.npy'))
+    wl_ref_file = os.path.join('data','ref','PACE_OCI.20240603T180158.L2.OC_AOP.V3_0.nc')
+    wave_all    = (
+        xr.open_dataset(wl_ref_file, group="sensor_band_parameters")
+          ["wavelength_3d"].data
     )
 
-    mc_results = mc_results + mc_results_NRT
+    bbox = (-83.5, 41.3, -82.45, 42.2)
+    dpi  = 100
 
-    if len(mc_results) == 0:
-        print("No granules found in search.")
-        date += timedelta(days=1)
-        continue
+    # ─── Process each date ────────────────────────────────────────────────────────
+    for current_date in dates_to_plot:
+        logging.info(f"Building plot for {current_date.isoformat()}")
+        t0 = datetime.combine(current_date, datetime.min.time(), timezone.utc) - timedelta(days=days_lookback)
+        t1 = datetime.combine(current_date, datetime.min.time(), timezone.utc)
 
-    mc_fileset = earthaccess.download(mc_results, './data/')
-
-    pacearray = None
-    wls      = None
-
-    valid_count = 0
-    for i, file in enumerate(mc_fileset):
-        print(f"regridding pace file {i+1} of {len(mc_fileset)} - {file}")
-
-        try:
-            res = process_pace_granule(file, bbox, {"res_km": 1.2}, wave_all)
-        except Exception as e:
-            logging.warning(f"Skipping granule {file!r} due to error: {e}")
+        results = (
+            with_retries(earthaccess.search_data,
+                         short_name="PACE_OCI_L2_AOP",
+                         temporal=(t0, t1), bounding_box=bbox)
+            + with_retries(earthaccess.search_data,
+                           short_name="PACE_OCI_L2_AOP_NRT",
+                           temporal=(t0, t1), bounding_box=bbox)
+        )
+        if not results:
+            logging.warning("  No granules found; skipping date.")
             continue
 
-        if not res:
-            logging.warning("no valid data → skipping")
-        elif ((wls is not None) and (lat_c is not None) and (lon_c is not None) and \
-             (not res[0] == wls or \
-              not all(res[2] == lat_c) or \
-              not all(res[3] == lon_c))):
-            logging.warning("results don't match")
-            exit()
-        else:
-            valid_count += 1
-            wls, arr_stack, lat_c, lon_c = res
-            plot_granule(file, arr_stack, bbox, out_dir)
-            if not isinstance(pacearray, np.ndarray):
-                if pacearray is None:
-                    print("initializing pacearray")
-                    pacearray = np.nan_to_num(arr_stack, nan=0.0)
-                    valid_pixel_count = (~np.isnan(arr_stack)).astype(int)
-            else:
-                # sum where valid
-                arr_stack_filled = np.nan_to_num(arr_stack, nan=0.0)
-                temp = pacearray
-                pacearray = np.add(temp, arr_stack_filled)
-                print("pacearray == temp?", np.all((pacearray == temp) | (np.isnan(pacearray) & np.isnan(temp))))
-                
-                # increment count where valid
-                valid_pixel_count += (~np.isnan(arr_stack)).astype(int)
+        files = with_retries(earthaccess.download, results, './data/')
+        files_sorted = sorted(files,
+                              key=lambda f: extract_datetime_from_filename(f),
+                              reverse=True)
 
-    if valid_count == 0:
-        print("No valid microcystin granules found for this date")
-        date += timedelta(days=1)
-        continue
+        # placeholders
+        lat_c = lon_c = None
+        mc_map = None
+        rgb_norm = None
 
-    # avoid divide by zero
-    with np.errstate(invalid="ignore", divide="ignore"):
-        pacearray = pacearray / valid_pixel_count
+        # lake mask
+        lake_mask = None
 
-    # replace 0 counts with nan
-    pacearray[valid_pixel_count == 0] = np.nan
-
-    patches = []
-    coords = []
-
-    r_idx, g_idx, b_idx = 105, 75, 48
-
-    # extract each band and transpose so that we get (H, W)
-    r = pacearray[r_idx, :, :].T
-    g = pacearray[g_idx, :, :].T
-    b = pacearray[b_idx, :, :].T
-
-    # stack into (H, W, 3)
-    rgb = np.dstack((r, g, b))
-
-    # normalize to [0,1] for display
-    rgb_min, rgb_max = np.nanmin(rgb), np.nanmax(rgb)
-    rgb_norm = (rgb - rgb_min) / (rgb_max - rgb_min)
-
-    for i, la in enumerate(lat_c):
-        for j, lo in enumerate(lon_c):
-            pd = extract_pace_patch(pacearray, wls, lo, la, patch_size, lat_c, lon_c)
-            bs = np.stack([pd[wl] for wl in wls], axis=-1)
-            
-            mask = np.any(~np.isnan(bs), axis=-1, keepdims=True).astype("float32")
-            
-            # Skip fully zero/NaN patches
-            if mask.sum() == 0:
+        for fpath in tqdm(files_sorted, desc=f"  Granules for {current_date}", unit="granule"):
+            try:
+                wls_curr, arr_stack, lat_c_curr, lon_c_curr = process_pace_granule(
+                    fpath, bbox, {"res_km":1.2}, wave_all
+                )
+            except Exception as e:
+                logging.warning(f"    Skipping {os.path.basename(fpath)}: {e}")
+                continue
+            if arr_stack is None:
                 continue
 
-            p4 = np.concatenate([bs, mask], axis=-1)
-            channel0 = p4[...,0].ravel()
-            p4 = (p4 - means.reshape(1,1,-1)) / (stds.reshape(1,1,-1) + 1e-6)
-            p4 = np.nan_to_num(p4, nan=0.0)
-            
-            patches.append(p4)
-            coords.append((i,j))
-    
-    if not patches:
-        raise RuntimeError("No valid patches found after averaging")
-    
-    X = np.stack(patches, axis=0)
+            ny, nx = arr_stack.shape[1], arr_stack.shape[2]
+            # build RGB
+            r = arr_stack[105].T; g = arr_stack[75].T; b = arr_stack[48].T
+            rgb_raw = np.dstack((r, g, b)).astype(float)
+            curr_min, curr_max = np.nanmin(rgb_raw), np.nanmax(rgb_raw)
+            if curr_max <= curr_min:
+                continue
+            rgb_curr = (rgb_raw - curr_min) / (curr_max - curr_min)
 
-    probs = cnn.predict(X).ravel()
-    raw_preds = cnn.predict(X)
-    
-    #probs[probs < 0.05] = np.nan # or use np.nan
-    mc_map = np.full((len(lat_c), len(lon_c)), np.nan)
-    count = 0
-    for (i, j), p in zip(coords, probs):
-        mc_map[i, j] = p
+            if mc_map is None:
+                # first granule → initialize all
+                lat_c, lon_c = lat_c_curr, lon_c_curr
+                mc_map = np.full((ny, nx), np.nan, dtype=float)
+                rgb_norm = rgb_curr.copy()
+                lon_grid, lat_grid = np.meshgrid(lon_c, lat_c)
+                raw_geoms = list(cfeature.LAKES.with_scale('10m').geometries())
+                lake_union = unary_union([g for g in raw_geoms if isinstance(g, BaseGeometry)])
+                lake_mask = shp_contains(lake_union, lon_grid, lat_grid)
+            else:
+                # fill holes in rgb_norm
+                holes = np.isnan(rgb_norm[...,0])
+                if holes.any():
+                    for c in range(3):
+                        band = rgb_norm[...,c]
+                        band[holes] = rgb_curr[...,c][holes]
+                        rgb_norm[...,c] = band
 
-    fig, ax = plt.subplots(figsize=(8,6),
-                       subplot_kw={"projection": ccrs.PlateCarree()})
+            # compute context once
+            gran_means = np.nanmean(arr_stack, axis=(1,2))
+            ctx_norm   = (gran_means - ctx_means) / (ctx_stds + 1e-6)
 
-    # Basemap
-    ax.set_facecolor("black")
-    ax.add_feature(cfeature.LAND.with_scale("10m"),
-                   facecolor="white", edgecolor="none")
-    ax.add_feature(cfeature.LAKES.with_scale("10m"),
-                   facecolor="black", zorder = 0)
-    
-    # Chlor plot
-    if include_chla:
-        chlor_a_plot = np.log10(chlarray).plot.pcolormesh(
-            ax=ax,
-            cmap="summer",
-            vmin=0.5, vmax=1.5,
-        transform=ccrs.PlateCarree(),
-            zorder=5,
-            add_colorbar=True,
-            cbar_kwargs={
-                "shrink": 0.8,
-                "pad": 0.05,
-                "label": "Chlorophyll-a [log10 (mg m$^{-3}$)]"
-            }
+            # build patches
+            X_patches, X_ctx, coords = [], [], []
+            for i in range(ny):
+                for j in range(nx):
+                    pdict = extract_pace_patch(arr_stack, wls_curr,
+                                               lon_c[j], lat_c[i],
+                                               patch_size, lat_c, lon_c)
+                    total = sum(a.size for a in pdict.values())
+                    valid = sum(np.count_nonzero(~np.isnan(a)) for a in pdict.values())
+                    if total==0 or (valid/total)<min_valid_frac:
+                        continue
+
+                    bs = np.stack([pdict[wl] for wl in wls_curr], axis=-1)
+                    mask = np.any(~np.isnan(bs), axis=-1, keepdims=True).astype('float32')
+                    p4 = np.concatenate([bs, mask], axis=-1)
+
+                    # normalize spectral bands
+                    C = patch_means.shape[0]
+                    spec = (p4[...,:C] - patch_means.reshape(1,1,C)) \
+                         / (patch_stds.reshape(1,1,C) + 1e-6)
+                    p4 = np.concatenate([spec, p4[...,C:]], axis=-1)
+                    p4[...,:C] = np.nan_to_num(p4[...,:C], nan=0.0)
+
+                    X_patches.append(p4)
+                    X_ctx.append(ctx_norm)
+                    coords.append((i,j))
+
+            if not X_patches:
+                continue
+
+            Xp = np.stack(X_patches, axis=0)
+            Xc = np.stack(X_ctx,     axis=0)
+
+            # ─── Multi‑model prediction & averaging ──────────────────────────────
+            # collect binary predictions from each model
+            bin_preds = []
+            for m in models:
+                probs = m.predict([Xp, Xc], verbose=0).ravel()
+                bin_preds.append((probs >= prob_threshold).astype(float))
+            # shape: (n_models, n_patches)
+            bin_preds = np.stack(bin_preds, axis=0)
+
+            # take mean across models: yields fraction ∈ [0,1]
+            frac_pos = bin_preds.mean(axis=0)
+
+            # fill mc_map with that fraction
+            for (i,j), frac in zip(coords, frac_pos):
+                if np.isnan(mc_map[i,j]):
+                    mc_map[i,j] = frac
+
+            # stop early if fully filled
+            if not np.isnan(mc_map).any() and not np.isnan(rgb_norm[...,0]).any():
+                break
+
+        if mc_map is None or np.all(np.isnan(mc_map)):
+            logging.warning(f"  No valid data for {current_date}; skipping.")
+            continue
+
+        # mask and transpose for plotting
+        rgb_plot = np.transpose(rgb_norm, (1,0,2))
+        mask = ~lake_mask
+        for c in range(3):
+            rgb_plot[...,c][mask] = np.nan
+        mc_plot = mc_map.copy()
+        mc_plot[mask] = np.nan
+
+        fig, ax = plt.subplots(
+            figsize=(8,6), subplot_kw={"projection": ccrs.PlateCarree()}
         )
+        ax.set_facecolor("black")
+        ax.add_feature(cfeature.LAND.with_scale("10m"), facecolor="white")
+        ax.add_feature(cfeature.LAKES.with_scale("10m"), facecolor="black", zorder=0)
 
-    extent = [bbox[0], bbox[2], bbox[1], bbox[3]]
-    rgb_rot = np.transpose(rgb_norm, (1, 0, 2))
+        extent = [bbox[0], bbox[2], bbox[1], bbox[3]]
+        ax.imshow(rgb_plot, origin="lower", extent=extent,
+                  transform=ccrs.PlateCarree(), zorder=2)
 
-    ax.imshow(
-        rgb_rot,
-        origin="lower",
-        extent=extent,
-        transform=ccrs.PlateCarree(),
-        zorder=2,         # behind pcolormesh
-        interpolation="nearest"
-    )
-    
-    # MC plot.
-    ax.imshow(
-        mc_map,
-        origin="lower",
-        extent=extent,                    # same [lon_min, lon_max, lat_min, lat_max]
-        transform=ccrs.PlateCarree(),
-        cmap="Reds",
-        vmin=0, vmax=1,
-        alpha = np.where((np.isnan(mc_map) | (mc_map < 0.5)), 0.0, 0.667),
-        interpolation="nearest",
-        zorder=10
-    )
+        # overlay average predictions in red
+        rgba = np.zeros((*mc_plot.shape, 4), dtype=float)
+        rgba[...,0] = 1.0            # red channel
+        rgba[...,3] = mc_plot        # alpha = fraction positive
+        ax.imshow(rgba, origin="lower", extent=extent,
+                  transform=ccrs.PlateCarree(), zorder=10)
 
-    # add coastlines, gridlines, colorbar as before…
-    ax.coastlines(resolution="10m")
-    gl = ax.gridlines(draw_labels=True, linestyle="--", linewidth=0.5)
-    gl.top_labels = False; gl.right_labels = False
+        ax.coastlines(resolution="10m")
+        gl = ax.gridlines(draw_labels=True, linestyle="--", linewidth=0.5)
+        gl.top_labels = gl.right_labels = False
 
-    # if you still want a colorbar for MC:
-    mappable = plt.cm.ScalarMappable(cmap="Reds", norm=plt.Normalize(0,1))
-    mappable.set_array(mc_map)  # so the colorbar knows the data range
-    cbar = plt.colorbar(mappable, ax=ax, orientation="vertical", pad=0.02, shrink=0.7)
-    cbar.set_label("Microcystin Probability")
+        plt.tight_layout()
+        outpath = os.path.join(out_dir, current_date.strftime("%Y%m%d") + ".png")
+        plt.savefig(outpath, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+        logging.info(f"  Saved plot → {outpath}")
 
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, f"{date.strftime('%Y%m%d')}.png"),
-                dpi=dpi, bbox_inches="tight")
-    plt.close(fig)
-
-    date += timedelta(days=1)
-
-    for filename in os.listdir('./data/'):
-        if filename.endswith('.nc'):
-            file_path = os.path.join('./data/', filename)
-            try:
-                os.remove(file_path)
-                print(f"Removed: {file_path}")
-            except OSError as e:
-                print(f"Error removing {file_path}: {e}")
-
-print("done!")
+    logging.info("All requested dates processed—done!")
