@@ -4,11 +4,11 @@ from cnn_model_dashboard import create_dash_app
 from datetime import date, timedelta
 
 # You can refactor this date block later into a helper if you want
-START_DATE_1 = date(2024, 5, 1)
-END_DATE_1   = date(2024, 11, 15)
+START_DATE_1 = date(2024, 6, 29)
+END_DATE_1   = date(2024, 7, 9)
 
-START_DATE_2 = date(2025, 6, 1)
-END_DATE_2   = date(2025, 8, 2)
+START_DATE_2 = date(2025, 6, 25)
+END_DATE_2   = date(2025, 7, 15)
 
 span_1 = (END_DATE_1 - START_DATE_1).days
 span_2 = (END_DATE_2 - START_DATE_2).days
