@@ -1,4 +1,5 @@
 import os
+import glob
 import math
 import logging
 import random
@@ -10,11 +11,16 @@ import earthaccess
 import cartopy.feature as cfeature
 from shapely.ops import unary_union
 from shapely.geometry import Point
+from earthaccess import Auth, DataCollections, DataGranules, Store, download
+from pathlib import Path
+import earthaccess
+
 
 from helpers import (
     process_pace_granule,
     extract_pace_patch,
-    get_granule_filename
+    get_granule_filename,
+    with_retries
 )
 
 def shp_contains(lake_geom, lon_grid, lat_grid):
@@ -30,13 +36,13 @@ def balance_dataset_by_oversample(
         patch_size        = 3,
         pm_threshold      = 0.1,
         bbox              = (-83.5, 41.3, -82.45, 42.2),
-        neg_to_pos_ratio  = 3,
+        neg_samples       = 3,
         start_date        = None,
         end_date          = None,
         save_dir          = './'
     ):
     """
-    Oversample negative patches from across the lake to achieve a custom negative:positive ratio,
+    Oversample negative patches from across the lake to achieve a custom negative samples number,
     appending per-band global means to each patch vector.
     """
     logging.basicConfig(level=logging.INFO)
@@ -59,7 +65,7 @@ def balance_dataset_by_oversample(
         return
 
     # determine how many new negatives are needed
-    total_target_neg = neg_to_pos_ratio * num_pos
+    total_target_neg = neg_samples
     need_neg = max(0, total_target_neg - existing_neg)
     logging.info(f"Found {num_pos} positives, {existing_neg} negatives, need {need_neg} more.")
 
@@ -69,14 +75,27 @@ def balance_dataset_by_oversample(
 
     # --- Load reference wavelengths & build lake mask ---
     logging.info("Loading reference wavelengths...")
-    ref_file = os.path.join('data', 'ref', 'PACE_OCI.20240603T180158.L2.OC_AOP.V3_0.nc')
+        # right after you’ve logged in and created your data directory:
+    print("Retrieving wavelength list from a reference file…")
+    ref_search = with_retries(
+        earthaccess.search_data,
+        short_name="PACE_OCI_L2_AOP",
+        temporal=("2024-06-01", "2024-06-05"),
+        bounding_box=bbox,
+    )
+    ref_file = with_retries(earthaccess.download, ref_search, "./data")[0]
     wave_all = xr.open_dataset(ref_file, group="sensor_band_parameters")["wavelength_3d"].data
     n_wl = wave_all.size
 
-    logging.info("Building lake mask...")
     _, arr_stack_ref, lat_grid_ref, lon_grid_ref = process_pace_granule(
-        ref_file, bbox, {"res_km":1.2}, wave_all
-    )
+        ref_file, bbox,  {"res_km":1.2}, wave_all
+    ) or (None, None, None, None)
+
+    if arr_stack_ref is None:
+        # os.remove(filepath)
+        print("Ref file is bad.")
+        return
+
     lon_grid, lat_grid = np.meshgrid(lon_grid_ref, lat_grid_ref)
     raw_geoms = list(cfeature.LAKES.with_scale('10m').geometries())
     lake_union = unary_union([g for g in raw_geoms if hasattr(g, 'geom_type')])

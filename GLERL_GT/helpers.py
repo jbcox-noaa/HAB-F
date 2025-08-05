@@ -150,6 +150,7 @@ def process_pace_granule(filepath, bbox, sensor_params, wave_all):
     """
 
     # 1. Open dataset groups
+
     try:
         with xr.open_dataset(filepath, group="geophysical_data") as geo_ds, \
              xr.open_dataset(filepath, group="navigation_data") as nav_ds:
@@ -175,7 +176,8 @@ def process_pace_granule(filepath, bbox, sensor_params, wave_all):
                 wl_coord = "wavelength"
             else:
                 raise ValueError("Cannot find wavelength coordinate in Rrs")
-            wavelengths = rrs[wl_coord].values  # e.g. array([400, 412.5, ...])
+            wavelengths = rrs[wl_coord].values
+            wavelengths = np.atleast_1d(wavelengths)
     except Exception as e:
         raise RuntimeError(f"Failed to open or interpret PACE granule {filepath}: {e}")
 
@@ -202,6 +204,7 @@ def process_pace_granule(filepath, bbox, sensor_params, wave_all):
         regridded_slices.append((wl, regridded_2d))
 
     if not regridded_slices:
+        print("No valid bands, returning None.")
         return None  # no valid bands
    
     # Stack into an xarray DataArray or numpy array: shape (n_wl, ny, nx)
@@ -576,3 +579,13 @@ def shp_contains(geom, lon_grid, lat_grid):
     # vectorize a simple point-in-polygon test
     contains_vec = np.vectorize(lambda lon, lat: geom.contains(Point(lon, lat)))
     return contains_vec(lon_grid, lat_grid)
+
+def patch_to_features(patch_dict):
+    """
+    Convert {wavelength: patch} dict into a flattened feature vector,
+    filtering NaNs or applying any preprocessing used in training.
+    """
+    patch_stack = np.stack([patch_dict[wl] for wl in sorted(patch_dict)], axis=0)  # [bands, P, P]
+    flat = patch_stack.reshape(patch_stack.shape[0], -1)  # [bands, P*P]
+    feat = np.nanmean(flat, axis=1)  # mean reflectance per band
+    return feat  # shape: (bands,)

@@ -317,8 +317,6 @@ def balance_dataset_by_granule(
                     logging.warning(f"PACE processing failed for {fname}: {e}")
                     with open(invalid_txt, "a") as f:
                         f.write(fname + "\n")
-                    try: os.remove(gran_path)
-                    except: pass
                     continue
 
                 if result is None:

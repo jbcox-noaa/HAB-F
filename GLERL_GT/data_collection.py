@@ -10,11 +10,11 @@ from train_model           import train_model
     
 logging.basicConfig(level=logging.INFO)
 
-bbox = (-83.5, 41.3, -82.45, 42.2)
+bbox = (-83.5, 41.3, -81, 42.75)
 
 patch_sizes       = [5, 3, 7, 9]
 half_time_windows = [1]
-pm_thresholds     = [0.1]
+pm_thresholds     = [0.1, 5, 10]
 
 dates_to_plot = [
     date(2024, 5, 9),
@@ -34,7 +34,9 @@ for patch_size in patch_sizes:
     for half_time_window in half_time_windows:
         for pm_threshold in pm_thresholds:
 
-            save_dir = f'Grid_search_oversample5/{(half_time_window * 2) + 1}day_{patch_size}px_{pm_threshold}pm/'
+            save_dir = f'Grid_search_oversample7/{(half_time_window * 2) + 1}day_{patch_size}px_{pm_threshold}pm/'
+            #save_dir = f'Model_Average2/'
+            
             os.makedirs(save_dir, exist_ok=True)
 
             process_all_granules(
@@ -55,22 +57,15 @@ for patch_size in patch_sizes:
                 patch_size       = patch_size,
                 pm_threshold     = pm_threshold,
                 bbox             = bbox,
-                neg_to_pos_ratio = 20,
+                neg_samples      = 500,
                 start_date       = date(2024, 11, 15),
                 end_date         = date(2025, 5, 1),
                 save_dir         = save_dir
             )
-            input()
 
             train_model(
                 save_dir         = save_dir,
                 sensor           = "PACE",
                 patch_size       = patch_size,
                 pm_threshold     = pm_threshold
-            )
-
-            plot_model_results(
-                patch_size       = patch_size,
-                save_dir         = save_dir,
-                dates_to_plot    = None
             )

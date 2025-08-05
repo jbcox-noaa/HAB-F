@@ -259,7 +259,7 @@ def plot_model_results(
                 fdate = fdate.replace(tzinfo=timezone.utc)
                 
                 if fdate < cutoff:
-                    os.remove(fpath)
+                    #os.remove(fpath)
                     logging.debug(f"  Removed old granule: {fname}")
             except Exception as e:
                 logging.warning(f"  Could not parse date for {fname}: {e}")
