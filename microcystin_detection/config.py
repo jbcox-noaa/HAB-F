@@ -105,8 +105,9 @@ TEMPORAL_SPLIT = {
 # Patch sizes to experiment with (in pixels)
 PATCH_SIZES = [3, 5, 7, 9]
 
-# Microcystin threshold for binary classification (µg/L)
-PM_THRESHOLDS = [0.1, 5.0, 10.0]
+# Particulate microcystin thresholds (µg/L)
+# Used for binary classification (above/below threshold)
+PM_THRESHOLDS = [0.1, 1.0]  # Low sensitivity (0.1) and moderate sensitivity (1.0)
 
 # Time window for matching satellite data to in-situ measurements
 HALF_TIME_WINDOW_DAYS = 1  # ±1 day = 3 day window total
