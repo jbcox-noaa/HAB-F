@@ -71,6 +71,17 @@ def prepare_features(
     Returns:
         Tuple of (X_patch, X_context, y_binary, context_size)
     """
+    # Filter to only samples with the requested patch size
+    # Sample format: (filename, station, labels_tuple, features, valid_fraction, patch_size)
+    filtered_data = [s for s in raw_data if s[5] == patch_size]
+    if len(filtered_data) == 0:
+        raise ValueError(f"No samples found with patch_size={patch_size}")
+    
+    logging.info(f"Filtered to {len(filtered_data)} samples with patch_size={patch_size} "
+                 f"(from {len(raw_data)} total)")
+    
+    raw_data = np.array(filtered_data, dtype=object)
+    
     # Determine feature dimensions
     first_sample = raw_data[0]
     first_flat = first_sample[3]
@@ -410,10 +421,11 @@ def train_model(
 
 if __name__ == '__main__':
     import argparse
+    from . import config
     
     parser = argparse.ArgumentParser(description='Train microcystin detection CNN')
-    parser.add_argument('--data-dir', type=str, default='./',
-                        help='Directory containing training data')
+    parser.add_argument('--data-dir', type=str, default=None,
+                        help='Directory containing training data (default: from config)')
     parser.add_argument('--sensor', type=str, default='PACE',
                         choices=['PACE', 'Sentinel-3'],
                         help='Sensor type')
@@ -431,6 +443,9 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     
+    # Use config directory if not specified
+    data_dir = args.data_dir if args.data_dir is not None else str(config.BASE_DIR)
+    
     # Configure logging
     logging.basicConfig(
         level=logging.INFO,
@@ -440,7 +455,7 @@ if __name__ == '__main__':
     
     # Train model
     loss, acc, auc, f1 = train_model(
-        save_dir=args.data_dir,
+        save_dir=data_dir,
         sensor=args.sensor,
         patch_size=args.patch_size,
         pm_threshold=args.threshold,
