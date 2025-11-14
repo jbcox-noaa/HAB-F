@@ -1,10 +1,106 @@
-GLERL_GT/.ipynb_checkpoints/*
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+*.egg-info/
+dist/
+build/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# Data files (large)
+*.npy
+*.nc
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.csv
+!glrl-hab-data.csv
+!user-labels.csv
+!user-labels1.csv
+
+# Model files (large)
+*.keras
+*.h5
+*.pt
+*.pth
+*.ckpt
+*.weights
+
+# Cache and temporary files
+cache/
+*/cache/
+Cache/*
+*.tmp
+*.log
+
+# Data directories
+*/data/*
+chla_lstm_forecasting/data/*
+microcystin_detection/data/*
 Data/*
+data/*
+
+# Model checkpoints
+*/models/*
+!*/models/.gitkeep
+chla_lstm_forecasting/models/*
+!chla_lstm_forecasting/models/.gitkeep
+microcystin_detection/models/*
+!microcystin_detection/models/.gitkeep
+
+# Images and plots
 Images/*
-Notebooks/.ipynb_checkpoints*
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
+!README_images/*.png
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+*/.DS_Store
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Elastic Beanstalk
+.elasticbeanstalk/
+.ebignore
+
+# Archived content
+archive/
+
+# Literature PDFs
+Literature/
+
+# Archived forecast bulletins (PDFs)
+Archived_Forecast_Bulletins/*.pdf
+
+# Old directories (to be migrated)
+CNN-LSTM/
+GLERL_GT/
+
+# Legacy files
 PMN.csv
 LabelData_20250611/*
-LabelData/*
-Cache/*
-*.nc
-*/.DS_Store

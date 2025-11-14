@@ -3,6 +3,8 @@ data_cache/
 Grid_*/
 Model_*/
 __pycache__/
+all_patches/
+Grid_search*/
 
 !cache/20240629.npz
 !cache/20240630.npz

@@ -317,7 +317,7 @@ def create_dash_app(dates):
 
         # ── build a gradient bar image (N × 1 × 3) ─────────────────────────
         N = final.shape[0]
-        grads = np.linspace(1, 0, N)[:,None]   # from 1 at top to 0 at bottom
+        grads = np.linspace(0, 1, N)[:, None]
         bar = np.zeros((N, 1, 3), dtype=np.uint8)
         # each row = mean_bg*(1–g) + red*g
         for i,g in enumerate(grads[:,0]):
@@ -329,12 +329,25 @@ def create_dash_app(dates):
         # 1) the color‐bar on the left
         fig.add_trace(go.Image(
             z=bar,
-            x0=lon_min - extra,       # left edge
+            x0=lon_min - (extra * 2),       # left edge
             y0=lat_min,               # bottom
             dx=extra,                 # width in lon units
             dy=(lat_max - lat_min)/N, # height per pixel
             colormodel="rgb"
         ))
+
+        # 1a) add vertical label to the left of the bar
+        bar_x_center = lon_min - (extra * 2) - extra
+        fig.add_annotation(
+            x=bar_x_center,
+            y=(lat_min + lat_max) / 2,
+            text="<b>Particulate Microcystin</b>",
+            showarrow=False,
+            textangle=-90,  # rotate so first letter is at bottom, text reads bottom→top
+            font=dict(family="Arial", size=18),
+            xanchor="center",
+            yanchor="middle"
+        )
 
         # 2) main RGB+overlay
         fig.add_trace(go.Image(
@@ -367,17 +380,19 @@ def create_dash_app(dates):
 
         # ── final layout tweaks ─────────────────────────────────────────────
         fig.update_layout(
-            margin=dict(l=100,r=0,t=30,b=0),
-            shapes=[  # if you still have lake‐shapes, they'd go here
-                # …
-            ],
-            xaxis=dict(visible=False, showgrid=False,
-                       range=[lon_min-extra, lon_max]),
-            yaxis=dict(visible=False, showgrid=False, scaleanchor="x",
-                       range=[lat_min, lat_max]),
-            paper_bgcolor="white", plot_bgcolor="white",
-            title=dict(text=dt.strftime("%Y-%m-%d"), x=0.5)
-        )
+                margin=dict(l=220, r=0, t=30, b=0),
+                xaxis=dict(
+                    visible=False, showgrid=False,
+                    range=[lon_min - 4*extra, lon_max]
+                ),
+                yaxis=dict(
+                    visible=False, showgrid=False, scaleanchor="x",
+                    range=[lat_min, lat_max]
+                ),
+                paper_bgcolor="white",
+                plot_bgcolor="white",
+                title=dict(text=dt.strftime("%Y-%m-%d"), x=0.5),
+            )
 
         return dt.strftime("%Y-%m-%d"), fig
 
