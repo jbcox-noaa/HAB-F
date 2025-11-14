@@ -57,18 +57,46 @@ SENSOR_PARAMS = {
         "short_names": PACE_SHORT_NAMES,
         "start_date": "2024-04-16",  # PACE mission start
         "res_km": 1.2,  # Spatial resolution in kilometers
-        "n_channels": 172,  # Number of spectral bands
+        "channels": list(range(172)),  # Channel indices (0-171)
+        "bbox": (-83.5, 41.3, -82.45, 42.2),  # Lake Erie
     },
-    "SENTINEL": {
+    "SENTINEL-3": {
         "short_names": ["OLCIS3A_L2_EFR_OC"],
         "start_date": "2016-04-25",
         "res_km": 0.3,
-        "n_channels": 21,
+        "channels": list(range(21)),  # Channel indices (0-20)
+        "bbox": (-83.5, 41.3, -82.45, 42.2),
     }
 }
 
 # Geographic bounding box for Lake Erie (lon_min, lat_min, lon_max, lat_max)
 BBOX = (-83.5, 41.3, -82.45, 42.2)
+
+# ============================================================================
+# TEMPORAL SPLITTING (to prevent data leakage)
+# ============================================================================
+
+# Temporal split strategy: stratified by date to preserve seasonal patterns
+# Based on GLERL measurement dates from PACE era (Apr 2024 - May 2025)
+# See docs/TEMPORAL_SPLITTING_STRATEGY.md for full analysis
+
+TEMPORAL_SPLIT = {
+    "train": [
+        "2024-04-17", "2024-04-25", "2024-05-01", "2024-05-08", "2024-05-15",
+        "2024-05-22", "2024-06-05", "2024-06-12", "2024-06-19"
+    ],
+    "val": [
+        "2024-06-26", "2024-07-10", "2024-07-24", "2024-08-07", "2024-08-21"
+    ],
+    "test": [
+        "2024-09-04", "2024-09-18", "2024-10-02", "2024-10-16", "2024-10-30",
+        "2024-11-13", "2024-11-27", "2024-12-11", "2024-12-25", "2025-01-08"
+    ]
+}
+
+# Total dates: 24 (9 train / 5 val / 10 test)
+# Split ratio: 37.5% train / 20.8% val / 41.7% test
+# Note: Test set is larger to ensure robust evaluation across seasons
 
 # ============================================================================
 # MODEL HYPERPARAMETERS
@@ -150,7 +178,8 @@ LOG_LEVEL = "INFO"  # Options: DEBUG, INFO, WARNING, ERROR
 
 def get_channels_for_sensor(sensor: str) -> int:
     """Get number of spectral channels for a sensor."""
-    return SENSOR_PARAMS.get(sensor.upper(), {}).get("n_channels", 172)
+    channels = SENSOR_PARAMS.get(sensor.upper(), {}).get("channels", list(range(172)))
+    return len(channels)
 
 
 def get_training_data_path(sensor: str) -> Path:
