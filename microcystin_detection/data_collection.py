@@ -360,8 +360,10 @@ def collect_training_data(
     
     if start_date is None:
         # Use sensor-specific start date or earliest observation
-        sensor_start = sensor_params.get('start_date', datetime(2024, 4, 16))
-        if isinstance(sensor_start, datetime):
+        sensor_start = sensor_params.get('start_date', '2024-04-16')
+        if isinstance(sensor_start, str):
+            start_date = datetime.strptime(sensor_start, '%Y-%m-%d').date()
+        elif isinstance(sensor_start, datetime):
             start_date = sensor_start.date()
         else:
             start_date = sensor_start
@@ -563,8 +565,8 @@ if __name__ == '__main__':
     parser.add_argument('--split', type=str, default='train',
                         choices=['train', 'val', 'test', 'all'],
                         help='Temporal split to collect')
-    parser.add_argument('--data-dir', type=str, default='./',
-                        help='Directory containing ground truth data')
+    parser.add_argument('--data-dir', type=str, default=None,
+                        help='Directory containing ground truth data (default: from config)')
     parser.add_argument('--patch-sizes', type=int, nargs='+',
                         default=None,
                         help='Patch sizes to extract (default: from config)')
@@ -577,12 +579,15 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     
+    # Use config directory if not specified
+    data_dir = args.data_dir if args.data_dir is not None else str(config.BASE_DIR)
+    
     collect_training_data(
         sensor=args.sensor,
         patch_sizes=args.patch_sizes,
         half_time_window=args.time_window,
         pm_threshold=args.threshold,
-        data_dir=args.data_dir,
+        data_dir=data_dir,
         temporal_split=args.split,
         load_user_labels=args.user_labels
     )
