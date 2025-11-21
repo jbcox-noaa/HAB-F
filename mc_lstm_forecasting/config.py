@@ -26,8 +26,14 @@ SEQUENCE_LENGTH = 5  # Number of days in lookback window
 FORECAST_HORIZON = 1  # Number of days ahead to predict
 
 # Date range for data
-TRAIN_YEAR = "2024"  # Training data year
-TEST_YEAR = "2025"   # Test data year (unseen bloom season)
+TRAIN_YEAR = "2024"  # All 2024 data for training (242 maps)
+VAL_YEAR = "2025"    # First part of 2025 for validation (includes early bloom)
+TEST_YEAR = "2025"   # Second part of 2025 for testing (includes peak bloom)
+
+# Temporal split strategy for 2025 data
+# Split at August 1, 2025 to ensure both val and test contain bloom season
+VAL_END_DATE = "20250801"  # Validation: Jan-Jul 2025 (includes bloom onset)
+TEST_START_DATE = "20250801"  # Test: Aug-Oct 2025 (includes peak bloom)
 
 # ============================================================================
 # MODEL ARCHITECTURE
@@ -50,10 +56,11 @@ BATCH_SIZE = 16
 EPOCHS = 100
 PATIENCE = 10  # Early stopping patience
 
-# Train/validation split (on 2024 data only)
-# Test uses entire 2025 bloom season
-TRAIN_SPLIT = 0.8  # 80% of 2024 for training
-VAL_SPLIT = 0.2    # 20% of 2024 for validation
+# Temporal split strategy:
+# - Train: All 2024 data (242 maps across all months)
+# - Validation: 2025 Jan-Jul (includes bloom onset, ~45 maps)
+# - Test: 2025 Aug-Oct (includes peak bloom, ~30 maps)
+# This ensures both validation and test sets contain bloom season data
 
 # ============================================================================
 # RANDOM SEED

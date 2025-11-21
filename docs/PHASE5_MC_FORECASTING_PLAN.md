@@ -106,20 +106,19 @@ def load_mc_sequences(data_dir, seq_len=5, forecast_horizon=1):
 **Critical Requirement:** Prevent temporal leakage
 
 ```python
-# Split by year for true temporal validation
-train_maps = [maps from 2024]  # 242 maps
-test_maps = [maps from 2025]   # 75 maps
-
-# Further split 2024 into train/val (80/20)
-# Train on first 80% of 2024 (chronologically)
-# Validate on last 20% of 2024
-# Final test on all 2025 (unseen bloom season)
+# Split by year and date
+train_maps = [all 2024 maps]          # 242 maps (entire year)
+val_maps = [2025 maps before Aug 1]   # ~45 maps (Jan-Jul, early bloom)
+test_maps = [2025 maps from Aug 1 on] # ~30 maps (Aug-Oct, peak bloom)
 ```
 
 **Rationale:** 
-- 2025 bloom season provides true out-of-sample validation
-- Tests model's ability to generalize to new bloom event
-- User's critical requirement: "I am adamant about getting the 2025 bloom season"
+- 2024 provides complete training data (full bloom cycle)
+- 2025 validation set includes bloom onset (June-July)
+- 2025 test set includes peak bloom (August-September)
+- Both validation and test contain bloom season data
+- Tests model's ability to predict different bloom stages
+- True out-of-sample validation (2025 unseen during training)
 
 ### 3. Sequence Creation
 
@@ -130,8 +129,9 @@ For each valid temporal window:
 4. Skip if any dates missing in sequence or target
 
 **Expected Output:**
-- 2024: ~200-220 sequences (depends on gaps)
-- 2025: ~60-70 sequences for testing
+- 2024 training: ~200-220 sequences
+- 2025 validation: ~35-40 sequences (early bloom)
+- 2025 test: ~25-30 sequences (peak bloom)
 
 ---
 

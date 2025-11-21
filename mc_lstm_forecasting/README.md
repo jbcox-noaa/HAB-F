@@ -34,18 +34,31 @@ This module implements a ConvLSTM (Convolutional Long Short-Term Memory) neural 
 
 ### Temporal Coverage
 ```
-March 2024:    8 maps    |  March 2025:   19 maps
-April 2024:   20 maps    |  April 2025:   14 maps
-May 2024:     20 maps    |  May 2025:     15 maps
-June 2024:    20 maps    |  June 2025:     8 maps
-July 2024:    19 maps    |  July 2025:    22 maps
-August 2024:  25 maps    |  August 2025:  21 maps
-September 2024: 19 maps  |  September 2025: 25 maps
-October 2024: 21 maps    |  October 2025:  1 map
-November 2024: 12 maps
-December 2024: 11 maps
-January 2025:  11 maps
-February 2025:  6 maps
+TRAINING SET (2024 - 242 maps):
+  March 2024:    8 maps
+  April 2024:   20 maps
+  May 2024:     20 maps
+  June 2024:    20 maps    ← Bloom onset
+  July 2024:    19 maps    ← Early bloom
+  August 2024:  25 maps    ← Peak bloom
+  September 2024: 19 maps  ← Late bloom
+  October 2024: 21 maps    ← Bloom decline
+  November 2024: 12 maps
+  December 2024: 11 maps
+  January 2025:  11 maps
+
+VALIDATION SET (2025 Jan-Jul - ~45 maps):
+  February 2025:  6 maps
+  March 2025:   19 maps
+  April 2025:   14 maps
+  May 2025:     15 maps
+  June 2025:     8 maps    ← Bloom onset (validation)
+  July 2025:    22 maps    ← Early bloom (validation)
+
+TEST SET (2025 Aug-Oct - ~30 maps):
+  August 2025:  21 maps    ← Peak bloom (test)
+  September 2025: 25 maps  ← Late bloom (test)
+  October 2025:  1 map     ← Bloom decline (test)
 ```
 
 ---
@@ -163,14 +176,18 @@ X, y, dates = load_mc_sequences(
 ### Step 2: Temporal Split
 
 ```python
-# Split by year (prevent temporal leakage)
-train_2024 = sequences[dates.year == 2024]  # ~200-220 sequences
-test_2025 = sequences[dates.year == 2025]   # ~60-70 sequences
+# Split by year and date (prevent temporal leakage)
+train_2024 = sequences[dates.year == 2024]  # All 2024 (~200-220 sequences)
 
-# Further split 2024 into train/val (80/20)
-train_sequences = train_2024[:int(0.8 * len(train_2024))]
-val_sequences = train_2024[int(0.8 * len(train_2024)):]
+# Split 2025 into validation and test
+val_2025 = sequences[(dates.year == 2025) & (dates < '2025-08-01')]  # Jan-Jul (~35-40 sequences)
+test_2025 = sequences[(dates.year == 2025) & (dates >= '2025-08-01')]  # Aug-Oct (~25-30 sequences)
 ```
+
+**Key Advantage:** Both validation and test sets contain bloom season data
+- Validation: Early bloom onset (June-July 2025)
+- Test: Peak bloom conditions (August-September 2025)
+- This tests model's ability to predict different bloom stages
 
 ### Step 3: Model Training
 
@@ -248,16 +265,22 @@ Based on chlorophyll forecasting success (MSE=0.3965):
 **Critical Requirement:** Prevent temporal leakage in time series
 
 ```
-Training:   2024 Jan-Oct (80% of sequences)
-Validation: 2024 Nov-Dec (20% of sequences)
-Test:       2025 Jan-Oct (entire year - unseen bloom season)
+Training:   2024 ALL (242 maps)
+Validation: 2025 Jan-Jul (~45 maps, includes early bloom)
+Test:       2025 Aug-Oct (~30 maps, includes peak bloom)
 ```
 
 **Why This Matters:**
 - Time series data has autocorrelation
 - Random shuffle would leak future → past
 - Year-based split ensures true out-of-sample validation
-- Tests ability to generalize to new bloom event
+- Both val and test contain bloom season data for realistic evaluation
+- Tests model on different bloom stages (onset vs peak)
+
+**Bloom Season Coverage:**
+- Training (2024): Full bloom cycle Jun-Oct (104 maps)
+- Validation (2025): Bloom onset Jun-Jul (~30 maps)
+- Test (2025): Peak bloom Aug-Sep (~46 maps)
 
 ### Data Handling
 
