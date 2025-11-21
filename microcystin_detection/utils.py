@@ -200,13 +200,19 @@ def process_pace_granule(
         logging.error(f"Failed to open PACE granule {filepath}: {e}")
         return None
     
-    # Regrid each wavelength
+    # Regrid each wavelength (with early termination if no bbox coverage)
     regridded_slices = []
-    for wl in available_wavelengths:
+    consecutive_failures = 0
+    MAX_CONSECUTIVE_FAILURES = 10  # Stop if 10 wavelengths in a row fail
+    
+    for i, wl in enumerate(available_wavelengths):
         try:
             slice_da = rrs.sel({wl_coord: wl}, method="nearest")
         except Exception as e:
-            logging.warning(f"Failed to select wavelength {wl}nm: {e}")
+            consecutive_failures += 1
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                logging.warning(f"Granule outside bbox - {consecutive_failures} consecutive wavelengths failed")
+                break
             continue
         
         lat_arr = ds["latitude"].values
@@ -214,9 +220,15 @@ def process_pace_granule(
         
         result = regrid_pace_slice(slice_da, lat_arr, lon_arr, bbox, res_km)
         if result is None:
-            logging.warning(f"Regrid failed for wavelength {wl}nm")
+            consecutive_failures += 1
+            # Early termination: if first 10 wavelengths all fail, granule is outside bbox
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                logging.warning(f"Granule outside bbox - {consecutive_failures} consecutive wavelengths failed")
+                break
             continue
         
+        # Success - reset counter
+        consecutive_failures = 0
         regridded_2d, target_lats, target_lons = result
         regridded_slices.append((wl, regridded_2d))
     
@@ -283,7 +295,7 @@ def regrid_pace_slice(
     valid = np.isfinite(data_local) & np.isfinite(lats_local) & np.isfinite(lons_local)
     
     if not np.any(valid):
-        logging.warning("No valid data in bbox region")
+        # No logging here - let caller handle it to avoid log spam
         return None
     
     # Resample using pyresample

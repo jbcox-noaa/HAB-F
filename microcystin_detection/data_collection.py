@@ -6,10 +6,12 @@ This module handles:
 - Processing granules to extract patches around ground truth locations
 - Implementing temporal splitting to prevent data leakage
 - Saving features and labels for model training
+- Hash-based tracking to prevent duplicate samples and enable crash recovery
 """
 
 import os
 import logging
+import hashlib
 from typing import List, Tuple, Set, Optional, Dict
 from datetime import datetime, timedelta
 
@@ -30,6 +32,47 @@ from .utils import (
     save_station_colors,
     get_granule_filename
 )
+
+
+def compute_sample_hash(filename: str, station: str, timestamp: datetime, patch_size: int) -> str:
+    """
+    Compute unique hash for a sample to prevent duplicates.
+    
+    Args:
+        filename: Granule filename
+        station: Station name
+        timestamp: Observation timestamp
+        patch_size: Patch size used
+        
+    Returns:
+        SHA256 hash string (first 16 chars)
+    """
+    # Create unique string from sample identifying info
+    unique_str = f"{filename}|{station}|{timestamp.isoformat()}|{patch_size}"
+    hash_obj = hashlib.sha256(unique_str.encode('utf-8'))
+    return hash_obj.hexdigest()[:16]
+
+
+def build_existing_hashes(results: List) -> Set[str]:
+    """
+    Build set of hashes from existing results.
+    
+    Args:
+        results: List of existing samples (filename, station, label_tuple, ...)
+        
+    Returns:
+        Set of sample hashes
+    """
+    hashes = set()
+    for sample in results:
+        if len(sample) >= 6:
+            filename, station, label_tuple, _, _, patch_size = sample[:6]
+            # Extract timestamp from label_tuple: (station, timestamp, lat, lon, ...)
+            if len(label_tuple) >= 2:
+                timestamp = label_tuple[1]
+                sample_hash = compute_sample_hash(filename, station, timestamp, patch_size)
+                hashes.add(sample_hash)
+    return hashes
 
 
 class CorruptedGranulesTracker:
@@ -157,7 +200,8 @@ def process_single_granule(
     wavelengths: np.ndarray,
     patch_sizes: List[int],
     half_time_window: int,
-    corrupted_tracker: CorruptedGranulesTracker
+    corrupted_tracker: CorruptedGranulesTracker,
+    existing_hashes: Set[str] = None
 ) -> List[Tuple]:
     """
     Process one granule and extract patches for all patch sizes.
@@ -165,6 +209,16 @@ def process_single_granule(
     Args:
         filepath: Path to downloaded granule file
         station_df: DataFrame of ground truth observations
+        bbox: Bounding box (lon_min, lat_min, lon_max, lat_max)
+        res_km: Grid resolution in km
+        wavelengths: Array of wavelengths to process
+        patch_sizes: List of patch sizes to extract
+        half_time_window: Half-width of time window in days
+        corrupted_tracker: Tracker for corrupted granules
+        existing_hashes: Set of already-processed sample hashes (for deduplication)
+        
+    Returns:
+        List of sample tuples
         bbox: Bounding box (lon_min, lat_min, lon_max, lat_max)
         res_km: Resolution in kilometers
         wavelengths: Array of wavelengths to process
@@ -235,6 +289,13 @@ def process_single_granule(
         
         # Extract patches for all patch sizes
         for patch_size in patch_sizes:
+            # Check if this sample already exists (hash-based deduplication)
+            if existing_hashes is not None:
+                sample_hash = compute_sample_hash(filename, station, t0, patch_size)
+                if sample_hash in existing_hashes:
+                    logging.debug(f"Skipping duplicate: {filename}, {station}, {t0}, patch={patch_size}")
+                    continue
+            
             # Extract patch
             patch_dict = extract_pace_patch(
                 arr_stack, wls, lon0, lat0,
@@ -252,6 +313,12 @@ def process_single_granule(
                 np.count_nonzero(~np.isnan(arr)) for arr in patch_dict.values()
             )
             valid_frac = valid_pixels / total_pixels if total_pixels > 0 else 0.0
+            
+            # Skip patches with insufficient valid pixel coverage
+            if valid_frac < config.MIN_VALID_FRACTION:
+                logging.debug(f"Skipping patch with low coverage: {valid_frac:.2f} < {config.MIN_VALID_FRACTION} "
+                             f"(station={station}, patch_size={patch_size})")
+                continue
             
             # Build feature vector: [patch_pixels (flattened), global_means]
             patch_stack = np.stack(
@@ -389,8 +456,12 @@ def collect_training_data(
         existing = np.load(extraction_path, allow_pickle=True)
         results = existing.tolist()
         logging.info(f"Loaded {len(results)} existing samples from {extraction_path}")
+        # Build hash set from existing samples for deduplication
+        existing_hashes = build_existing_hashes(results)
+        logging.info(f"Built hash set with {len(existing_hashes)} existing samples")
     else:
         results = []
+        existing_hashes = set()
     
     station_colors = load_station_colors(station_colors_json)
     
@@ -528,8 +599,18 @@ def collect_training_data(
                 wavelengths=wavelengths,
                 patch_sizes=patch_sizes,
                 half_time_window=half_time_window,
-                corrupted_tracker=corrupted_tracker
+                corrupted_tracker=corrupted_tracker,
+                existing_hashes=existing_hashes
             )
+            
+            # Add new hashes to set (for deduplication within same run)
+            for sample in granule_results:
+                if len(sample) >= 6:
+                    filename, station, label_tuple, _, _, patch_size = sample[:6]
+                    if len(label_tuple) >= 2:
+                        timestamp = label_tuple[1]
+                        sample_hash = compute_sample_hash(filename, station, timestamp, patch_size)
+                        existing_hashes.add(sample_hash)
             
             results.extend(granule_results)
             

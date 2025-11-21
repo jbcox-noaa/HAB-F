@@ -163,14 +163,19 @@ def balance_by_oversampling_negatives(
     logging.info(f"Current distribution: {dist['positive']} positive, {dist['negative']} negative")
     logging.info(f"Imbalance ratio: {dist['imbalance_ratio']:.2f}")
     
-    if dist['negative'] >= dist['positive']:
-        logging.info("Classes already balanced; no action needed")
+    # Target: 2x as many negatives as positives (ratio = 0.5)
+    target_ratio = 0.5
+    target_negatives = int(dist['positive'] / target_ratio)
+    
+    if dist['negative'] >= target_negatives:
+        logging.info(f"Classes already balanced (have {dist['negative']}, need {target_negatives}); no action needed")
         return
     
-    n_needed = dist['positive'] - dist['negative']
-    n_to_collect = min(n_needed, n_negative_samples)
+    n_needed = target_negatives - dist['negative']
+    n_to_collect = min(n_negative_samples, n_needed) if n_negative_samples < n_needed else n_needed
     
-    logging.info(f"Need {n_needed} negative samples; will collect up to {n_to_collect}")
+    logging.info(f"Target: {target_negatives} negatives (2x positives) for ratio=0.5")
+    logging.info(f"Need {n_needed} more negative samples; will attempt to collect up to {n_to_collect}")
     
     # ===== SET DATE RANGE =====
     if start_date is None:
@@ -254,125 +259,170 @@ def balance_by_oversampling_negatives(
     bbox = sensor_params['bbox']
     lon_min, lat_min, lon_max, lat_max = bbox
     
-    for granule in unique_granules:
-        if n_collected >= n_to_collect:
-            break
+    # Track sampled locations per granule to avoid duplicates across iterations
+    sampled_locations = {}  # {filename: set of (lat, lon) tuples}
+    
+    # We may need to loop through all granules multiple times
+    max_iterations = 5
+    iteration = 0
+    
+    while n_collected < n_to_collect and iteration < max_iterations:
+        iteration += 1
+        logging.info(f"Starting iteration {iteration}/{max_iterations}")
         
-        filename = get_granule_filename(granule)
-        if not filename:
-            continue
+        # Shuffle granules at start of each iteration for different processing order
+        random.shuffle(unique_granules)
         
-        logging.info(f"Processing {filename}...")
-        
-        # Download
-        try:
-            paths = with_retries(earthaccess.download, [granule], temp_dir)
-            if not paths:
-                continue
-            granule_path = paths[0]
-        except Exception as e:
-            logging.warning(f"Download failed: {e}")
-            continue
-        
-        # Process granule
-        try:
-            result = process_pace_granule(
-                granule_path,
-                bbox,
-                wavelengths,
-                sensor_params['res_km']
-            )
+        for granule in unique_granules:
+            if n_collected >= n_to_collect:
+                break
             
-            if result is None:
+            filename = get_granule_filename(granule)
+            if not filename:
+                continue
+            
+            # Initialize sampled locations for this granule if needed
+            if filename not in sampled_locations:
+                sampled_locations[filename] = set()
+            
+            logging.info(f"Processing {filename} (iteration {iteration})...")
+            
+            # Download
+            try:
+                paths = with_retries(earthaccess.download, [granule], temp_dir)
+                if not paths:
+                    continue
+                granule_path = paths[0]
+            except Exception as e:
+                logging.warning(f"Download failed: {e}")
+                continue
+            
+            # Process granule
+            try:
+                result = process_pace_granule(
+                    granule_path,
+                    bbox,
+                    wavelengths,
+                    sensor_params['res_km']
+                )
+                
+                if result is None:
+                    os.remove(granule_path)
+                    continue
+                
+                wls, arr_stack, target_lats, target_lons = result
+            except Exception as e:
+                logging.warning(f"Processing failed: {e}")
+                try:
+                    os.remove(granule_path)
+                except:
+                    pass
+                continue
+            
+            # Extract datetime
+            dt = extract_datetime_from_filename(filename)
+            if dt is None:
                 os.remove(granule_path)
                 continue
             
-            wls, arr_stack, target_lats, target_lons = result
-        except Exception as e:
-            logging.warning(f"Processing failed: {e}")
+            # Try to extract valid patches from this granule
+            # Keep trying random locations until we get some valid patches or hit retry limit
+            max_attempts_per_granule = 50  # Try up to 50 random locations per granule
+            samples_from_this_granule = 0
+            attempts = 0
+            
+            while samples_from_this_granule < 10 and attempts < max_attempts_per_granule and n_collected < n_to_collect:
+                attempts += 1
+                
+                # Random location in Lake Erie
+                lat = random.uniform(lat_min, lat_max)
+                lon = random.uniform(lon_min, lon_max)
+                
+                # Round to grid precision to avoid resampling same pixel
+                lat_rounded = round(lat, 4)
+                lon_rounded = round(lon, 4)
+                location_key = (lat_rounded, lon_rounded)
+                
+                # Skip if we've already sampled this location
+                if location_key in sampled_locations[filename]:
+                    continue
+                
+                sampled_locations[filename].add(location_key)
+                
+                # Extract patch
+                patch_dict = extract_pace_patch(
+                    arr_stack, wls, lon, lat,
+                    pixel_count=patch_size,
+                    lat_centers=target_lats,
+                    lon_centers=target_lons
+                )
+                
+                if patch_dict is None:
+                    continue
+                
+                # Check if too many NaNs
+                total_pixels = sum(arr.size for arr in patch_dict.values())
+                valid_pixels = sum(np.count_nonzero(~np.isnan(arr)) for arr in patch_dict.values())
+                valid_frac = valid_pixels / total_pixels if total_pixels > 0 else 0.0
+                
+                if valid_frac < config.MIN_VALID_FRACTION:
+                    continue
+                
+                # Build feature vector
+                patch_stack = np.stack(
+                    [patch_dict[wl] for wl in sorted(patch_dict)],
+                    axis=-1
+                )
+                global_means = np.nanmean(arr_stack, axis=(1, 2))
+                feature_vector = np.concatenate([patch_stack.flatten(), global_means])
+                
+                # Create negative label
+                t0 = pd.to_datetime(dt).tz_localize('UTC')
+                label_tuple = (
+                    f"BALANCED_{n_collected}",  # unique station name
+                    t0,
+                    lat,
+                    lon,
+                    0.0,  # PM concentration = 0 (negative)
+                    np.nan,  # dissolved microcystin
+                    np.nan   # chlorophyll-a
+                )
+                
+                # Add to results
+                results.append((
+                    filename,
+                    f"BALANCED_{n_collected}",
+                    label_tuple,
+                    feature_vector,
+                    valid_frac,
+                    patch_size
+                ))
+                
+                n_collected += 1
+                samples_from_this_granule += 1
+                
+                # Save incrementally every 10 samples
+                if n_collected % 10 == 0:
+                    np.save(training_path, np.array(results, dtype=object))
+                    logging.info(f"Collected {n_collected}/{n_to_collect} negative samples")
+            
+            # Clean up granule file
             try:
                 os.remove(granule_path)
             except:
                 pass
-            continue
+            
+            if samples_from_this_granule > 0:
+                logging.info(f"  Extracted {samples_from_this_granule} valid samples from {filename}")
         
-        # Extract datetime
-        dt = extract_datetime_from_filename(filename)
-        if dt is None:
-            os.remove(granule_path)
-            continue
+        if n_collected >= n_to_collect:
+            break
         
-        # Sample random locations and extract patches
-        samples_per_granule = min(5, n_to_collect - n_collected)
-        
-        for i in range(samples_per_granule):
-            # Random location in Lake Erie
-            lat = random.uniform(lat_min, lat_max)
-            lon = random.uniform(lon_min, lon_max)
-            
-            # Extract patch
-            patch_dict = extract_pace_patch(
-                arr_stack, wls, lon, lat,
-                pixel_count=patch_size,
-                lat_centers=target_lats,
-                lon_centers=target_lons
-            )
-            
-            if patch_dict is None:
-                continue
-            
-            # Check if too many NaNs
-            total_pixels = sum(arr.size for arr in patch_dict.values())
-            valid_pixels = sum(np.count_nonzero(~np.isnan(arr)) for arr in patch_dict.values())
-            valid_frac = valid_pixels / total_pixels if total_pixels > 0 else 0.0
-            
-            if valid_frac < config.MIN_VALID_FRACTION:
-                continue
-            
-            # Build feature vector
-            patch_stack = np.stack(
-                [patch_dict[wl] for wl in sorted(patch_dict)],
-                axis=-1
-            )
-            global_means = np.nanmean(arr_stack, axis=(1, 2))
-            feature_vector = np.concatenate([patch_stack.flatten(), global_means])
-            
-            # Create negative label
-            t0 = pd.to_datetime(dt).tz_localize('UTC')
-            label_tuple = (
-                f"BALANCED_{i}",  # station name
-                t0,
-                lat,
-                lon,
-                0.0,  # PM concentration = 0 (negative)
-                np.nan,  # dissolved microcystin
-                np.nan   # chlorophyll-a
-            )
-            
-            # Add to results
-            results.append((
-                filename,
-                f"BALANCED_{i}",
-                label_tuple,
-                feature_vector,
-                valid_frac,
-                patch_size
-            ))
-            
-            n_collected += 1
-            
-            if n_collected >= n_to_collect:
-                break
-        
-        # Save incrementally
-        np.save(training_path, np.array(results, dtype=object))
-        logging.info(f"Collected {n_collected}/{n_to_collect} negative samples")
-        
-        # Clean up granule
-        try:
-            os.remove(granule_path)
-        except:
-            pass
+        logging.info(f"Iteration {iteration} complete: {n_collected}/{n_to_collect} collected")
+    
+    # Final save of training data
+    np.save(training_path, np.array(results, dtype=object))
+    logging.info(f"Final collection complete: {n_collected}/{n_to_collect} negative samples collected")
     
     # ===== SAVE BALANCED DATA =====
     balanced_path = os.path.join(data_dir, f'training_data_balanced_{sensor}.npy')
@@ -403,8 +453,8 @@ if __name__ == '__main__':
                         help='PM threshold for classification')
     parser.add_argument('--data-dir', type=str, default='./',
                         help='Data directory')
-    parser.add_argument('--n-samples', type=int, default=500,
-                        help='Number of negative samples to collect')
+    parser.add_argument('--n-samples', type=int, default=2000,
+                        help='Maximum number of negative samples to collect (default: 2000)')
     parser.add_argument('--start-date', type=str, default=None,
                         help='Start date for winter granules (YYYY-MM-DD)')
     parser.add_argument('--end-date', type=str, default=None,

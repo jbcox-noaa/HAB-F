@@ -67,6 +67,7 @@ BBOX = (-83.5, 41.3, -82.45, 42.2)
 
 # Band index for Sentinel-3 chlorophyll-a
 S3_CHLA_BAND_INDEX = 21
+CHLA_BAND_INDEX = S3_CHLA_BAND_INDEX  # Alias for compatibility
 
 # Valid pixel threshold (minimum valid pixels per image)
 VALID_PIXEL_THRESHOLD = 6500
@@ -120,9 +121,9 @@ MIXED_PRECISION_POLICY = "mixed_float16"
 # ============================================================================
 
 # Training parameters
-BATCH_SIZE = 4  # Small batch size due to large spatial dimensions
-LEARNING_RATE = 1e-4
-EPOCHS = 50
+BATCH_SIZE = 16  # Restore to original batch size for faster training
+LEARNING_RATE = 1e-4  # Standard learning rate (proven to work in Run 1)
+EPOCHS = 100
 
 # Train/val/test split ratios
 TRAIN_SPLIT = 0.6
@@ -147,7 +148,7 @@ CHECKPOINT_VERBOSE = 1
 
 # Early stopping
 EARLY_STOPPING_MONITOR = "val_loss"
-EARLY_STOPPING_PATIENCE = 5
+EARLY_STOPPING_PATIENCE = 10
 EARLY_STOPPING_RESTORE_BEST = True
 EARLY_STOPPING_VERBOSE = 1
 

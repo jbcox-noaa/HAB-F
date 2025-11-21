@@ -12,10 +12,11 @@ This module handles:
 import os
 import logging
 from typing import Tuple
+from datetime import datetime
 
 import numpy as np
 import tensorflow as tf
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GroupShuffleSplit
 from sklearn.metrics import f1_score, classification_report, confusion_matrix
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
 
@@ -58,7 +59,7 @@ def prepare_features(
     patch_size: int,
     n_channels: int,
     pm_threshold: float = 0.1
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
     """
     Convert raw data into model inputs (patch, context) and labels.
     
@@ -69,7 +70,7 @@ def prepare_features(
         pm_threshold: Threshold for binary classification (µg/L)
         
     Returns:
-        Tuple of (X_patch, X_context, y_binary, context_size)
+        Tuple of (X_patch, X_context, y_binary, dates, context_size)
     """
     # Filter to only samples with the requested patch size
     # Sample format: (filename, station, labels_tuple, features, valid_fraction, patch_size)
@@ -98,20 +99,32 @@ def prepare_features(
     
     logging.info(f"Feature dimensions: patch={feat_patch}, context={context_size}")
     
-    # Build arrays
+    # Build arrays AND extract dates for temporal splitting
     n = len(raw_data)
     X_all = np.zeros((n, n_features), dtype=float)
     y_all = np.zeros((n,), dtype=float)
+    dates = []
     
     for i, sample in enumerate(raw_data):
-        # sample format: (lon, lat, labels, flat_features, ...)
-        _, _, labels, flat_features, *_ = sample
+        # sample format: (filename, station, labels, flat_features, ...)
+        filename, _, labels, flat_features, *_ = sample
         X_all[i] = flat_features
         
         # Extract particulate microcystin concentration
         # labels[4] is PM concentration in µg/L
         particulate_mc = labels[4] if len(labels) >= 5 and not np.isnan(labels[4]) else 0.01
         y_all[i] = particulate_mc
+        
+        # Extract date from filename (format: PACE_OCI.20240517T160942.L2.OC.V2_0.NRT.nc)
+        try:
+            date_str = filename.split('.')[1][:8]  # YYYYMMDD
+            date_obj = datetime.strptime(date_str, '%Y%m%d')
+            dates.append(date_obj)
+        except Exception as e:
+            logging.warning(f"Could not parse date from {filename}: {e}")
+            dates.append(datetime(2024, 1, 1))  # Fallback date
+    
+    dates = np.array(dates)
     
     # Split patch and context features
     X_patch_flat = X_all[:, :feat_patch]
@@ -130,7 +143,7 @@ def prepare_features(
     logging.info(f"Class distribution: positive={y_binary.sum():.0f}, "
                  f"negative={len(y_binary) - y_binary.sum():.0f}")
     
-    return X_patch, X_context, y_binary, context_size
+    return X_patch, X_context, y_binary, dates, context_size
 
 
 def normalize_features(
@@ -222,24 +235,31 @@ def create_train_val_test_split(
     X_patch: np.ndarray,
     X_context: np.ndarray,
     y: np.ndarray,
-    test_size: float = 0.125,
-    val_size: float = 0.143,
+    dates: np.ndarray,
+    test_size: float = 0.2,
+    val_size: float = 0.125,
     random_state: int = 42
 ) -> Tuple:
     """
-    Split data into train/val/test sets.
+    Split data into train/val/test sets using TEMPORAL grouping.
+    
+    CRITICAL FIX FOR DATA LEAKAGE:
+    - Groups samples by date to prevent temporal leakage
+    - Ensures samples from same day stay together in one split
+    - Prevents model from "seeing" test dates during training
     
     Split strategy:
-    - 12.5% test (1/8)
-    - 14.3% validation (1/7 of remaining)
-    - 75% train
+    - 20% test (by dates)
+    - 12.5% validation (by dates, from remaining 80%)
+    - 67.5% train
     
     Args:
         X_patch: Patch features
         X_context: Context features
         y: Labels
+        dates: Date array (one per sample)
         test_size: Fraction for test set
-        val_size: Fraction of remaining data for validation
+        val_size: Fraction of remaining data for validation  
         random_state: Random seed for reproducibility
         
     Returns:
@@ -247,25 +267,71 @@ def create_train_val_test_split(
                   X_context_train, X_context_val, X_context_test,
                   y_train, y_val, y_test)
     """
-    # First split: separate test set
-    X_patch_tmp, X_patch_test, X_context_tmp, X_context_test, y_tmp, y_test = \
-        train_test_split(
-            X_patch, X_context, y,
-            test_size=test_size,
-            random_state=random_state,
-            stratify=y
-        )
+    # Create date groups (format: YYYYMMDD as string)
+    date_groups = np.array([d.strftime('%Y%m%d') for d in dates])
+    unique_dates = np.unique(date_groups)
     
-    # Second split: validation from remaining
-    X_patch_train, X_patch_val, X_context_train, X_context_val, y_train, y_val = \
-        train_test_split(
-            X_patch_tmp, X_context_tmp, y_tmp,
-            test_size=val_size,
-            random_state=random_state,
-            stratify=y_tmp
-        )
+    logging.info(f"Temporal split: {len(unique_dates)} unique dates, {len(dates)} total samples")
+    logging.info(f"Date range: {dates.min().strftime('%Y-%m-%d')} to {dates.max().strftime('%Y-%m-%d')}")
     
-    logging.info(f"Split sizes: train={len(y_train)}, val={len(y_val)}, test={len(y_test)}")
+    # First split: separate test set BY DATE
+    gss_test = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
+    train_val_idx, test_idx = next(gss_test.split(X_patch, y, groups=date_groups))
+    
+    X_patch_tmp = X_patch[train_val_idx]
+    X_context_tmp = X_context[train_val_idx]
+    y_tmp = y[train_val_idx]
+    date_groups_tmp = date_groups[train_val_idx]
+    
+    X_patch_test = X_patch[test_idx]
+    X_context_test = X_context[test_idx]
+    y_test = y[test_idx]
+    
+    # Second split: validation from remaining BY DATE
+    gss_val = GroupShuffleSplit(n_splits=1, test_size=val_size, random_state=random_state)
+    train_idx, val_idx = next(gss_val.split(X_patch_tmp, y_tmp, groups=date_groups_tmp))
+    
+    X_patch_train = X_patch_tmp[train_idx]
+    X_context_train = X_context_tmp[train_idx]
+    y_train = y_tmp[train_idx]
+    
+    X_patch_val = X_patch_tmp[val_idx]
+    X_context_val = X_context_tmp[val_idx]
+    y_val = y_tmp[val_idx]
+    
+    # Report split statistics
+    train_dates = np.unique(date_groups[train_val_idx][train_idx])
+    val_dates = np.unique(date_groups[train_val_idx][val_idx])
+    test_dates = np.unique(date_groups[test_idx])
+    
+    logging.info(f"\nSplit sizes (samples):")
+    logging.info(f"  Train: {len(y_train)} samples ({len(y_train)/len(y)*100:.1f}%)")
+    logging.info(f"  Val:   {len(y_val)} samples ({len(y_val)/len(y)*100:.1f}%)")
+    logging.info(f"  Test:  {len(y_test)} samples ({len(y_test)/len(y)*100:.1f}%)")
+    
+    logging.info(f"\nSplit sizes (unique dates):")
+    logging.info(f"  Train: {len(train_dates)} dates")
+    logging.info(f"  Val:   {len(val_dates)} dates")
+    logging.info(f"  Test:  {len(test_dates)} dates")
+    
+    logging.info(f"\nClass distribution:")
+    logging.info(f"  Train: {y_train.sum():.0f} pos / {len(y_train)-y_train.sum():.0f} neg")
+    logging.info(f"  Val:   {y_val.sum():.0f} pos / {len(y_val)-y_val.sum():.0f} neg")
+    logging.info(f"  Test:  {y_test.sum():.0f} pos / {len(y_test)-y_test.sum():.0f} neg")
+    
+    # CRITICAL CHECK: Ensure no date overlap
+    date_overlap_train_val = set(train_dates) & set(val_dates)
+    date_overlap_train_test = set(train_dates) & set(test_dates)
+    date_overlap_val_test = set(val_dates) & set(test_dates)
+    
+    if date_overlap_train_val or date_overlap_train_test or date_overlap_val_test:
+        logging.error("❌ DATE LEAKAGE DETECTED!")
+        logging.error(f"  Train-Val overlap: {len(date_overlap_train_val)} dates")
+        logging.error(f"  Train-Test overlap: {len(date_overlap_train_test)} dates")
+        logging.error(f"  Val-Test overlap: {len(date_overlap_val_test)} dates")
+        raise ValueError("Date leakage detected in splits!")
+    else:
+        logging.info("✅ No date overlap between splits - temporal leakage prevented")
     
     return (X_patch_train, X_patch_val, X_patch_test,
             X_context_train, X_context_val, X_context_test,
@@ -306,8 +372,8 @@ def train_model(
     # ===== LOAD DATA =====
     raw_data, metadata = load_training_data(save_dir, sensor)
     
-    # ===== PREPARE FEATURES =====
-    X_patch, X_context, y_binary, context_size = prepare_features(
+    # ===== PREPARE FEATURES (NOW INCLUDES DATES) =====
+    X_patch, X_context, y_binary, dates, context_size = prepare_features(
         raw_data, patch_size, n_channels, pm_threshold
     )
     
@@ -316,16 +382,29 @@ def train_model(
         X_patch, X_context, n_channels, save_dir
     )
     
-    # ===== AUGMENT =====
-    X_patch, X_context, y_binary = augment_data(
-        X_patch, X_context, y_binary, patch_size
-    )
+    # ===== SPLIT FIRST (CRITICAL FIX #1: Split before augmentation) =====
+    logging.info("\n" + "="*70)
+    logging.info("CRITICAL FIX: Splitting BEFORE augmentation to prevent leakage")
+    logging.info("="*70)
     
-    # ===== SPLIT =====
-    splits = create_train_val_test_split(X_patch, X_context, y_binary)
+    splits = create_train_val_test_split(X_patch, X_context, y_binary, dates)
     (X_patch_train, X_patch_val, X_patch_test,
      X_context_train, X_context_val, X_context_test,
      y_train, y_val, y_test) = splits
+    
+    # ===== AUGMENT ONLY TRAINING SET (CRITICAL FIX #2: No augmentation of val/test) =====
+    logging.info("\n" + "="*70)
+    logging.info("CRITICAL FIX: Augmenting ONLY training set (not val/test)")
+    logging.info("="*70)
+    
+    X_patch_train, X_context_train, y_train = augment_data(
+        X_patch_train, X_context_train, y_train, patch_size
+    )
+    
+    logging.info(f"Final dataset sizes:")
+    logging.info(f"  Train: {len(y_train)} samples (augmented)")
+    logging.info(f"  Val:   {len(y_val)} samples (original, no augmentation)")
+    logging.info(f"  Test:  {len(y_test)} samples (original, no augmentation)")
     
     # ===== BUILD MODEL =====
     model = build_model(

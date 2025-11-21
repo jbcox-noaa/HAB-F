@@ -137,7 +137,7 @@ AUGMENT_FLIPS = True  # Flip patches horizontally, vertically, both
 BALANCE_METHOD = "oversample"  # Options: "oversample", "granule", "none"
 OVERSAMPLE_NEG_SAMPLES = 500  # Number of negative samples to add
 OVERSAMPLE_START_DATE = "2024-11-15"
-OVERSAMPLE_END_DATE = "2025-05-01"
+OVERSAMPLE_END_DATE = "2025-04-01"
 
 # ============================================================================
 # PREDICTION CONFIGURATION
