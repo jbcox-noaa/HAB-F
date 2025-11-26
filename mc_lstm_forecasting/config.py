@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR = PROJECT_ROOT / "data" / "MC_probability_maps"
 MODEL_DIR = PROJECT_ROOT / "mc_lstm_forecasting"
 MODEL_PATH = MODEL_DIR / "best_model.keras"
+PLOTS_DIR = PROJECT_ROOT / "visualizations" / "mc_forecasting"
 
 # ============================================================================
 # DATA PARAMETERS
@@ -23,7 +24,9 @@ WIDTH = 73   # Longitude dimension
 
 # Temporal parameters
 SEQUENCE_LENGTH = 5  # Number of days in lookback window
+SEQ_LEN = SEQUENCE_LENGTH  # Alias for consistency with utils
 FORECAST_HORIZON = 1  # Number of days ahead to predict
+MAX_GAP_DAYS = 3  # Maximum gap between dates in sequence (days)
 
 # Date range for data
 TRAIN_YEAR = "2024"  # All 2024 data for training (242 maps)

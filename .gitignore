@@ -41,13 +41,21 @@ cache/
 */cache/
 Cache/*
 *.tmp
+
+# Logs (now organized in logs/)
+logs/
 *.log
+*.txt
+!requirements.txt
 
 # Data directories
 */data/*
 chla_lstm_forecasting/data/*
 microcystin_detection/data/*
 Data/*
+data/PACE/*
+data/MC_probability_maps/*
+data/cache/*
 data/*
 
 # Model checkpoints

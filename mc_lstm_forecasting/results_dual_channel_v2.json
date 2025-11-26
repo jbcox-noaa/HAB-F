@@ -1,0 +1,20 @@
+{
+  "test_mse": 0.024723853915929794,
+  "test_mae": 0.10694988816976547,
+  "test_rmse": 0.1572382075576092,
+  "best_val_loss": 0.03983041271567345,
+  "best_epoch": 130,
+  "total_epochs": 145,
+  "improvement_vs_baseline": 73.95158413746005,
+  "improvement_vs_phase1": 61.002154774709304,
+  "improvement_vs_phase2_original": 60.97999760750956,
+  "training_config": {
+    "initial_lr": 0.001,
+    "min_lr": 1e-05,
+    "dropout": 0.4,
+    "l2_reg": 0.001,
+    "batch_size": 16,
+    "augmentation": true,
+    "schedule": "cosine_annealing"
+  }
+}

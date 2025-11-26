@@ -1,0 +1,23 @@
+{
+  "phase2_mse": 0.0779537558555603,
+  "phase2_mae": 0.21751417219638824,
+  "phase2_rmse": 0.279201998301517,
+  "improvement_over_baseline": 17.86993008949028,
+  "improvement_over_phase1": -22.959329719486902,
+  "training_epochs": 12,
+  "best_epoch": 2,
+  "metadata": {
+    "train_coverage": {
+      "original_pct": 32.78104933062832,
+      "temporal_pct": 14.170451893211727,
+      "spatial_pct": 8.869818129589401,
+      "unfilled_pct": 44.178680646570555
+    },
+    "test_coverage": {
+      "original_pct": 37.38553897586432,
+      "temporal_pct": 11.08529028049576,
+      "spatial_pct": 8.97311236138291,
+      "unfilled_pct": 42.556058382257014
+    }
+  }
+}
